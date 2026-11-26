@@ -1,8 +1,8 @@
-# fast video player (CuePlayer)
+# fast video player
 
 CuePlayer is a Windows x64 video player for live shows. Arrange clips in a cue list, preview playback, and send video and audio over NDI, OMT or a supported DeckLink SDI output. Each cue can hold its last frame, go to black, loop, or cut or fade into the next clip.
 
-**[Download the Windows x64 installer · version 0.1.0.32](https://github.com/peteraellig/cueplayer/releases/download/v0.1.0.32/FastVideoPlayer-Setup-0.1.0.32.exe)**
+**[Download the Windows x64 installer · version 0.1.0.32](https://github.com/peteraellig/fast-video-player/releases/download/v0.1.0.32/FastVideoPlayer-Setup-0.1.0.32.exe)**
 
 ![CuePlayer main screen with cue list and video preview](logo/Mainscreen.png)
 
