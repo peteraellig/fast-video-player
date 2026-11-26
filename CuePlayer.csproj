@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AssemblyName>CuePlayer</AssemblyName>
+    <RootNamespace>CuePlayer</RootNamespace>
+    <Version>0.1.0.32</Version>
+    <AssemblyVersion>0.1.0.32</AssemblyVersion>
+    <FileVersion>0.1.0.32</FileVersion>
+    <Authors>Peter Aellig</Authors>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationIcon>logo\fast_video_player.ico</ApplicationIcon>
+    <Product>fast video player</Product>
+    <NoWarn>$(NoWarn);MSB3277;WFO1000;CA1416</NoWarn>
+    <!-- the published program for the installer and the finished installers are not part of the project -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);setup\app\**;publish\**</DefaultItemExcludes>
+    <!-- 64-bit program only: leave out the 32-bit libVLC that VideoLAN.LibVLC.Windows copies by default -->
+    <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LibVLCSharp" Version="3.9.4" />
+    <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.21" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3485.44" />
+    <!-- C# bindings for FFmpeg 8.1 (audio of files with several tracks, e.g. MXF with 8 mono tracks) -->
+    <PackageReference Include="FFmpeg.AutoGen" Version="8.1.0" />
+    <!-- local audio monitor (WASAPI), MIT licence -->
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- OMT SDK (MIT), same files as PresenterOmt / LiveIn -->
+    <None Include="..\sdi_converter\third_party\omt\Libraries\Winx64\libomt.dll" Link="libomt.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\sdi_converter\third_party\omt\Libraries\Winx64\libvmx.dll" Link="libvmx.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="licence\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="ui\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="logo\fast_video_player.ico" Link="fast_video_player.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- FFmpeg 8.1.3 LGPL shared build (from Z:\FastvideoDirect\work\native-sdk\ffmpeg-lgpl-8.1.3), only the four DLLs needed -->
+    <None Include="third_party\ffmpeg\*.dll" Link="ffmpeg\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- DeckLink API as a .NET interop assembly (TlbImp of DeckLinkAPI64.dll, copied from ID4); the driver itself comes with Blackmagic Desktop Video -->
+    <Reference Include="Interop.DeckLinkAPI">
+      <HintPath>third_party\decklink\Interop.DeckLinkAPI.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

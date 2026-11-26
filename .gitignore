@@ -1,0 +1,27 @@
+# Track project inputs and publication assets only.
+*
+!*/
+!/.gitignore
+!/README.md
+!/*.cs
+!/*.csproj
+!/ui/index.html
+!/ui/logo.png
+!/ui/logo_text.png
+!/logo/fast_video_player.ico
+!/logo/fast_video_player.png
+!/logo/Mainscreen.png
+!/setup/build.cmd
+!/setup/FastVideoPlayer.iss
+!/setup/make_icon.ps1
+!/third_party/decklink/Interop.DeckLinkAPI.dll
+!/third_party/ffmpeg/*.dll
+!/third_party/ffmpeg/LICENSE.txt
+!/licence/FFmpeg-LGPL-3.0.txt
+!/licence/LGPL-2.1.txt
+!/licence/OMT-LICENSE.txt
+!/licence/THIRD-PARTY-NOTICES.txt
+/bin/
+/obj/
+/publish/
+/setup/app/

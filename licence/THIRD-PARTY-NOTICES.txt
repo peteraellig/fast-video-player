@@ -1,0 +1,44 @@
+fast video player - third-party components
+==========================================
+
+fast video player (CuePlayer) by Peter Aellig uses the following components.
+
+1. libVLC and LibVLCSharp (VideoLAN)
+   Decoding and playback of the media files.
+   Licence: GNU Lesser General Public License, version 2.1 or later (LGPL-2.1-or-later).
+   Full licence text: LGPL-2.1.txt in this folder (from https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt)
+   Source code: https://code.videolan.org/videolan/vlc (libVLC 3.0.21)
+                https://code.videolan.org/videolan/LibVLCSharp (3.9.4)
+   The libraries are used unchanged and linked dynamically (folder libvlc\ and LibVLCSharp.dll);
+   they can be replaced by other builds of the same version.
+
+2. Open Media Transport (OMT) - libomt.dll, libvmx.dll
+   Sending the picture and sound as OMT; libvmx also decodes the pictures of VMX files (vMix recordings).
+   Licence: MIT, see OMT-LICENSE.txt in this folder.
+
+3. NDI(R)
+   Sending the picture and sound as NDI. The NDI runtime is NOT part of this program: it is used when it is installed
+   on the PC (NDI Tools or NDI Runtime from https://ndi.video). NDI(R) is a registered trademark of Vizrt NDI AB.
+
+3a. Blackmagic Design DeckLink API
+   SDI output through DeckLink / UltraStudio devices. The driver (Blackmagic Desktop Video) is NOT part of this program;
+   Interop.DeckLinkAPI.dll is the .NET type library import of its DeckLinkAPI64.dll. DeckLink and UltraStudio are
+   trademarks of Blackmagic Design Pty. Ltd.
+
+3b. NAudio (NAudio.Core, NAudio.Wasapi 2.2.1)
+   Listening to the output sound on a Windows audio device. MIT licence, Copyright (c) Mark Heath and contributors,
+   https://github.com/naudio/NAudio
+
+4. Microsoft Edge WebView2
+   The control window. The WebView2 runtime is part of Windows 11 (and can be installed on Windows 10 from Microsoft).
+   Microsoft.Web.WebView2 SDK: BSD-style licence by Microsoft Corporation.
+
+5. FFmpeg 8.1.3 (LGPL build) - folder ffmpeg\ (avformat-62, avcodec-62, avutil-60, swresample-6)
+   Sound of files with several audio tracks (e.g. MXF with 8 mono tracks), read all tracks at once.
+   Licence: GNU Lesser General Public License, version 3 (LGPL-3.0), see FFmpeg-LGPL-3.0.txt in this folder.
+   Build: ffmpeg-n8.1.3-34-ga35157abb9-win64-lgpl-shared-8.1 (BtbN FFmpeg-Builds), source code: https://ffmpeg.org / https://github.com/FFmpeg/FFmpeg
+   Unchanged, linked dynamically; the DLLs can be replaced by other builds of the same version.
+   C# bindings: FFmpeg.AutoGen 8.1.0 (LGPL-3.0, https://github.com/Ruslan-B/FFmpeg.AutoGen).
+
+6. .NET (Microsoft)
+   The program is published self-contained with the .NET runtime. Licence: MIT.

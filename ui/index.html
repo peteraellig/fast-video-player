@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>fast video player</title>
+<style>
+  :root {
+    --bg: #0b2547;          /* deep blue background */
+    --panel: #1b4478;       /* containers: clearly lighter than the background */
+    --panel2: #2a5a98;      /* buttons, fields */
+    --hover: #3567aa;
+    --line: #8cc4ff;        /* light blue borders */
+    --text: #ffffff; --dim: #d2e4fa;
+    --accent: #ffffff;      /* playing: white progress bars */
+    --playrow: #3d78c4;     /* playing row: brighter than the other rows */
+    --next: #ffd84a;        /* yellow: next (GO) - blue/yellow stays distinct */
+    --warn: #ffd84a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.35 "Segoe UI", system-ui, sans-serif; user-select: none; overflow: hidden; }
+  button, select, input { font: inherit; color: inherit; }
+  button { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+  button:hover { background: var(--hover); border-color: #ffffff; }
+  button:active { transform: translateY(1px); }
+  select, input[type=text] { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+
+  /* minmax(0, 1fr) and min-height: 0 below: without them the list grows with its rows and runs out of the window instead of scrolling */
+  .app { display: grid; grid-template-columns: 1fr 560px; grid-template-rows: 58px minmax(0, 1fr); height: 100%; }
+  header .about { text-align: right; color: var(--dim); font-size: 13px; line-height: 1.35; white-space: nowrap; }
+  header #clock { color: var(--text); font-size: 16px; font-variant-numeric: tabular-nums; }
+  /* three parts: icon + status | text logo exactly in the middle (Peter) | fps, version, clock */
+  header { grid-column: 1 / 3; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 16px;
+           padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header .hleft, header .hright { display: flex; align-items: center; gap: 14px; min-width: 0; overflow: hidden; }
+  header .hright { justify-content: flex-end; }
+  header .hright #hFps { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  header .wordmark { height: 34px; width: auto; display: block; }
+  header .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: .3px; white-space: nowrap; }
+  header .logo img { height: 46px; width: 46px; }
+  header .chip { color: var(--dim); white-space: nowrap; }
+  header .chip b { color: var(--text); font-weight: 600; }
+  header .spacer { flex: 1; }
+
+  /* cue list */
+  .list { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--line); }
+  .list .bar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .list .bar .title { font-weight: 600; margin-right: auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .list .bar .mod { color: var(--next); font-weight: 400; margin-left: 8px; }
+  /* "Add media" stands apart from the file buttons: one button width gap, orange */
+  .list .bar #btnAdd { margin-left: 90px; background: #ff9a2e; border-color: #ffd2a1; color: #0b2547; font-weight: 700; }
+  .list .bar #btnAdd:hover { background: #ffb55c; border-color: #ffffff; }
+  .cue.missing .name { color: var(--next); }
+  .cue .tag.miss { color: var(--next); }
+  .cue .tag.ready { color: var(--dim); }
+  .list .bar .status { color: var(--warn); min-width: 0; margin-right: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cues { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px 40px; position: relative; scrollbar-color: #6d9fd8 #0d2a4f; scrollbar-width: auto; }
+  .cues.droptarget { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  .empty { color: var(--dim); text-align: center; margin-top: 80px; line-height: 1.8; }
+  .cue { position: relative; display: grid; grid-template-columns: 34px 78px 1fr 64px 86px 120px 62px 30px; align-items: center; gap: 8px;
+         padding: 8px 8px; margin: 3px 0; border-radius: 6px; background: var(--panel); border: 2px solid transparent; overflow: hidden; cursor: default; }
+  .cue { border-color: rgba(140, 196, 255, .45); }
+  .cue:hover { background: var(--panel2); }
+  .cue .num { color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; }
+  .cue .tag { font-size: 11px; font-weight: 700; letter-spacing: .5px; }
+  .cue .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cue .name small { display: block; color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+  .cue .dur { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
+  .cue select { padding: 3px 6px; }
+  .cue .del { background: none; border: none; color: var(--dim); padding: 2px 6px; font-size: 16px; }
+  .cue .del:hover { color: var(--text); }
+  .cue .mv { display: flex; gap: 4px; }
+  .cue .mv button { padding: 2px 0; width: 28px; font-size: 12px; line-height: 1.4; }
+  .cue .mv button:disabled { opacity: .3; cursor: default; }
+  .cue .prog { position: absolute; left: 0; bottom: 0; height: 4px; background: var(--accent); width: 0; }
+  .cue.selected { border-color: var(--next); }
+  .cue.selected .tag.next { color: var(--next); }
+  .cue.playing { background: var(--playrow); border-color: #ffffff; }
+  .cue.playing .tag.play { color: var(--accent); }
+  .cue.dragging { opacity: .4; }
+  .cue.dropbefore { box-shadow: 0 -3px 0 0 var(--accent); }
+
+  /* right side */
+  .side { display: flex; flex-direction: column; gap: 12px; padding: 12px; overflow-y: auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .card h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .6px; display: flex; gap: 10px; align-items: baseline; }
+  .card h3 .msg { text-transform: none; letter-spacing: 0; color: var(--text); font-weight: 400; opacity: 0; transition: opacity .2s; }
+  .card h3 .msg.show { opacity: 1; }
+  .pvrow { display: flex; gap: 8px; align-items: stretch; }
+  .pvrow .preview { flex: 1; min-width: 0; }
+  /* audio level meters beside the preview, like OMTplay: sample peaks per file channel, dBFS -60..0 */
+  .meter { width: 116px; flex: none; background: var(--panel2); border-radius: 4px; }
+  .meter canvas { width: 100%; height: 100%; display: block; }
+  .preview { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 4px; overflow: hidden; }
+  .preview canvas { width: 100%; height: 100%; display: block; }
+  .preview .badge { position: absolute; left: 8px; top: 8px; background: rgba(0,0,0,.7); padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 700; letter-spacing: .5px; }
+  /* countdown of the last 10 s over the preview: big white number on a dark disc, readable at a glance for the operator */
+  .preview .countdown { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 150px; height: 150px; border-radius: 50%;
+                        display: none; align-items: center; justify-content: center; background: rgba(0, 0, 0, .62); border: 4px solid #ffffff;
+                        color: #ffffff; font-size: 96px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+  .preview .countdown.on { display: flex; }
+  .clock .remain.final { color: var(--next); font-weight: 600; }
+  .clock { display: flex; align-items: baseline; justify-content: space-between; margin-top: 10px; font-variant-numeric: tabular-nums; }
+  .clock .remain { font-size: 44px; font-weight: 300; letter-spacing: 1px; }
+  .clock .elapsed { color: var(--dim); text-align: right; }
+  /* hidden with visibility (keeps its place, nothing moves) when there is no clip longer than 10 s on air */
+  .clock .last10 { align-self: center; white-space: nowrap; }
+  .clock .last10.off { visibility: hidden; }
+  .clock .last10:disabled { opacity: .45; cursor: default; }
+  .nowname { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 20px; }
+  .seek { position: relative; height: 14px; margin: 8px 0 12px; background: var(--panel2); border-radius: 7px; cursor: pointer; }
+  .seek .fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 7px; width: 0; }
+  .transport { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; }
+  .transport .go { grid-column: 1 / 5; padding: 14px; font-size: 20px; font-weight: 700; letter-spacing: 1px; background: #3ccf5e; border: 2px solid #d4f7dc; color: #0b2547; }
+  .transport .go:hover { background: #5be07a; border-color: #ffffff; }
+  /* Stop: dark red with a white square - differs from the light green GO by brightness too (Peter is partly colour-blind) */
+  .transport #btnStop { background: #b3261e; border-color: #ff9b94; color: #ffffff; }
+  .transport #btnStop:hover { background: #cf3328; border-color: #ffffff; }
+  /* symbol buttons: fixed height, never wrap, so nothing moves when Pause turns into Continue */
+  .transport .sym { height: 44px; padding: 0; font-size: 20px; line-height: 1; white-space: nowrap; }
+  .transport .go small { display: block; font-size: 15px; font-weight: 600; color: #000000; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* two label/field pairs per line: Format | Name, Send as | SDI port; level and fade span the whole width */
+  .form { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px 10px; align-items: center; }
+  .form > select, .form > input { min-width: 0; width: 100%; box-sizing: border-box; }
+  .form .wide { grid-column: 2 / 5; }
+  .form .l2 { padding-left: 6px; }
+  .form label { color: var(--dim); white-space: nowrap; }
+  .form .row { display: flex; gap: 14px; align-items: center; }
+  .form .row label { color: var(--text); display: flex; gap: 6px; align-items: center; }
+  .outs { margin-top: 10px; color: var(--dim); font-size: 12px; line-height: 1.6; word-break: break-all; }
+  .outs b { color: var(--text); font-weight: 600; }
+  .keys { color: var(--dim); font-size: 12px; line-height: 1.7; }
+  kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font: 11px Consolas, monospace; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="hleft">
+      <span class="chip">Output <b id="hFormat">-</b></span>
+      <span class="chip">NDI <b id="hNdi">-</b></span>
+      <span class="chip">OMT <b id="hOmt">-</b></span>
+      <span class="chip">Audio <b id="hAudio">-</b></span>
+    </div>
+    <img class="wordmark" src="logo_text.png" alt="fast video player" title="fast video player">
+    <div class="hright">
+      <span class="chip" id="hFps">- fps</span>
+      <div class="about"><div id="hVersion"></div><div id="clock"></div></div>
+    </div>
+  </header>
+
+  <section class="list">
+    <div class="bar">
+      <span class="title"><span id="listName">Untitled</span><span class="mod" id="listMod"></span></span>
+      <span class="status" id="listMsg"></span>
+      <button id="btnNew" title="New empty playlist (Ctrl+N)">New</button>
+      <button id="btnOpen" title="Open a playlist (Ctrl+O)">Open…</button>
+      <button id="btnSave" title="Save the playlist (Ctrl+S)">Save</button>
+      <button id="btnSaveAs" title="Save under a new name (Ctrl+Shift+S)">Save as…</button>
+      <button id="btnAdd">+ Add media…</button>
+    </div>
+    <div class="cues" id="cues"></div>
+  </section>
+
+  <aside class="side">
+    <div class="card">
+      <h3>Output <span class="msg" id="outMsg"></span></h3>
+      <div class="pvrow">
+        <div class="preview"><canvas id="preview" width="640" height="360"></canvas><span class="badge" id="badge">STOPPED</span><span class="countdown" id="countdown"></span></div>
+        <div class="meter" title="Audio of the file on air: sample peak per channel (dBFS), before the audio choice"><canvas id="meter"></canvas></div>
+      </div>
+      <div class="clock"><span class="remain" id="remain">--:--.-</span><button class="last10" id="btnLast10" title="Jump to the last 10 seconds and play on (L)">⏩ Last 10 s</button><span class="elapsed" id="elapsed">--:-- / --:--</span></div>
+      <div class="nowname" id="nowName"></div>
+      <div class="seek" id="seek" title="Click to jump"><div class="fill" id="seekFill"></div></div>
+      <div class="transport">
+        <button class="go" id="btnGo"><span id="goLabel">GO</span><small id="goName">—</small></button>
+        <button class="sym" id="btnPrev" title="Previous cue">⏮</button>
+        <button class="sym" id="btnPause" title="Pause (P)">❚❚</button>
+        <button class="sym" id="btnStop" title="Stop to black (Esc)">■</button>
+        <button class="sym" id="btnNext" title="Next cue">⏭</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Settings <span class="msg" id="setMsg"></span></h3>
+      <div class="form">
+        <label for="fFormat">Format</label><select id="fFormat"></select>
+        <label for="fName" class="l2">Name</label><input type="text" id="fName" maxlength="60" title="Source name for NDI and OMT">
+        <label>Send as</label><div class="row"><label><input type="checkbox" id="fNdi"> NDI</label><label><input type="checkbox" id="fOmt"> OMT</label><label><input type="checkbox" id="fSdi"> SDI</label></div>
+        <label for="fSdiPort" class="l2">SDI port</label><select id="fSdiPort" title="Blackmagic DeckLink / UltraStudio device"></select>
+        <label for="fGain">Audio level</label><div class="row wide"><input type="range" id="fGain" min="-30" max="12" step="0.5" style="flex:1"><span id="gainVal" style="width:64px;text-align:right">0 dB</span><button id="btnApply">Apply</button></div>
+        <label for="fMonitor">Monitor</label>
+        <div class="row wide"><select id="fMonitor" style="flex:1;min-width:0" title="Listen to the output sound on this PC (applies at once)"></select></div>
+        <label for="fFade">Fade time</label>
+        <div class="row wide"><select id="fFade"></select><span style="color:var(--dim);font-size:12px">for “Fade next” and “Loop fade”, saved with the playlist</span></div>
+      </div>
+      <div class="outs" id="outs"></div>
+    </div>
+
+    <div class="card keys">
+      <kbd>Space</kbd> GO &nbsp; <kbd>Esc</kbd> Stop &nbsp; <kbd>P</kbd> Pause &nbsp; <kbd>L</kbd> Last 10 s &nbsp; <kbd>↑</kbd><kbd>↓</kbd> choose next &nbsp; <kbd>Alt</kbd>+<kbd>↑</kbd><kbd>↓</kbd> move chosen &nbsp; <kbd>Enter</kbd> play chosen &nbsp; <kbd>Del</kbd> remove chosen<br>
+      Drag files or folders from Explorer into the list. Drag cues to reorder.
+    </div>
+  </aside>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const send = (cmd, extra) => window.chrome.webview.postMessage(Object.assign({ cmd }, extra || {}));
+let S = null;                 // last state from the program
+let listKey = '';             // to rebuild the list only when it changed
+let settingsDirty = false;
+let dragId = null;
+
+const END_LABELS = { hold: 'Hold last', stop: 'Black', next: 'Cut next', fade: 'Fade next', loop: 'Loop', loopfade: 'Loop fade' };
+
+function fmt(ms, tenths) {
+  if (!(ms >= 0)) return tenths ? '--:--.-' : '--:--';
+  const t = Math.floor(ms / 100), s = Math.floor(t / 10), m = Math.floor(s / 60), h = Math.floor(m / 60);
+  let r = (h ? h + ':' + String(m % 60).padStart(2, '0') : String(m).padStart(2, '0')) + ':' + String(s % 60).padStart(2, '0');
+  return tenths ? r + '.' + (t % 10) : r;
+}
+
+function flash(id, text) {
+  const el = $(id); el.textContent = text; el.classList.add('show');
+  clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+function esc(t) { return String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---------- messages from the program ----------
+// preview: the program writes RGBA pictures into a shared buffer (two halves) and sends {type:'frame', half}
+let pbuf = null, pctx = null, pimg = null, psize = 0, previewCount = 0, previewFps = 0;
+setInterval(() => { previewFps = previewCount; previewCount = 0; }, 1000);
+window.chrome.webview.addEventListener('sharedbufferreceived', e => {
+  const info = e.additionalData || {};
+  const c = $('preview');
+  c.width = info.width || 640; c.height = info.height || 360;
+  pctx = c.getContext('2d');
+  pimg = pctx.createImageData(c.width, c.height);
+  psize = c.width * c.height * 4;
+  pbuf = e.getBuffer();
+});
+
+window.chrome.webview.addEventListener('message', e => {
+  const m = e.data;
+  if (m.type === 'frame') {
+    if (pbuf) { pimg.data.set(new Uint8ClampedArray(pbuf, m.half * psize, psize)); pctx.putImageData(pimg, 0, 0); previewCount++; }
+    return;
+  }
+  if (m.type === 'state') render(m);
+});
+
+function render(s) {
+  const first = !S;
+  s.receivedAt = performance.now();
+  S = s;
+  $('hFormat').textContent = s.format;
+  $('hAudio').textContent = s.audioChannels + ' ch';
+  meterUpdate(s.meter || []);
+  // The libraries only count connections. Every receiver opens two: OMT documents it ("one connection for video/metadata and a second
+  // for audio", libomt.h), NDI measured the same (one vMix input or one --probe = 2). Receivers = connections / 2, rounded up.
+  const recv = n => { const r = Math.ceil(n / 2); return r + ' receiver' + (r === 1 ? '' : 's'); };
+  $('hNdi').textContent = s.ndi.status === 'on' ? recv(s.ndi.connections) : s.ndi.status;
+  $('hOmt').textContent = s.omt.status === 'on' ? recv(s.omt.connections) : s.omt.status;
+  $('hNdi').title = `${s.ndi.connections} network connections (each receiver opens 2: picture and sound)`;
+  $('hOmt').title = `${s.omt.connections} network connections (each receiver opens 2: picture/metadata and sound)`;
+  $('hFps').textContent = s.fps + ' fps out · ' + s.decodedFps + ' fps file · ' + previewFps + ' fps preview' + (s.skipped ? ' · ' + s.skipped + ' skipped' : '');
+  $('hVersion').textContent = `version ${s.version} | Peter Aellig`;
+  const sdiText = s.sdi.status === 'on' ? 'on <b>' + esc(s.sdi.port) + '</b>' + (s.sdi.late || s.sdi.dropped ? ` (${s.sdi.late} late, ${s.sdi.dropped} dropped)` : '') : esc(s.sdi.status);
+  $('outs').innerHTML = (s.omt.address ? 'OMT <b>' + esc(s.omt.address) + '</b> · ' : 'OMT ' + esc(s.omt.status) + ' · ') +
+                        'NDI ' + esc(s.ndi.status === 'on' ? 'on' : s.ndi.status) + ' · SDI ' + sdiText +
+                        (s.monitor.status !== 'on' && s.monitor.status !== 'off' ? ' · Monitor ' + esc(s.monitor.status) : '');
+  $('listMsg').textContent = s.message || '';
+  $('listName').textContent = s.playlist.name;
+  $('listName').title = s.playlist.path || 'Not saved yet';
+  $('listMod').textContent = s.playlist.modified ? '● unsaved changes' : '';
+
+  // settings form (not while the user is editing it)
+  if (first) {
+    $('fFormat').innerHTML = s.formats.map(f => `<option>${f}</option>`).join('');
+    $('fFade').innerHTML = Array.from({ length: 10 }, (_, i) => (i + 1) * 100).map(ms => `<option value="${ms}">${ms} ms</option>`).join('');
+  }
+  if (document.activeElement !== $('fFade')) $('fFade').value = s.playlist.fadeMs;
+  // listening device: own control, applies at once; the saved one stays in the list (marked) when it is not there
+  {
+    const devs = s.monitor.devices.slice();
+    const cur = s.settings.monitorDevice || '';
+    if (cur && !devs.some(d => d.id === cur)) devs.push({ id: cur, name: 'saved device (not found)' });
+    const html = '<option value="">Off</option>' + devs.map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('');
+    const sel = $('fMonitor');
+    if (sel.dataset.html !== html) { sel.innerHTML = html; sel.dataset.html = html; }
+    if (document.activeElement !== sel) sel.value = cur;
+  }
+  if (first || !settingsDirty) {
+    $('fFormat').value = s.settings.format;
+    $('fName').value = s.settings.sourceName;
+    $('fNdi').checked = s.settings.ndi;
+    $('fOmt').checked = s.settings.omt;
+    $('fSdi').checked = s.settings.sdi;
+    // ports the driver reports; the saved one stays in the list (marked) when its device is not plugged in
+    const ports = s.sdi.ports.slice();
+    if (s.settings.sdiPort && !ports.includes(s.settings.sdiPort)) ports.push(s.settings.sdiPort);
+    const html = ports.length
+      ? ports.map(p => `<option value="${esc(p)}">${esc(p)}${s.sdi.ports.includes(p) ? '' : ' (not found)'}</option>`).join('')
+      : '<option value="">no device</option>';
+    if ($('fSdiPort').dataset.html !== html) { $('fSdiPort').innerHTML = html; $('fSdiPort').dataset.html = html; }   // rebuilt only when the list changes
+    $('fSdiPort').value = s.settings.sdiPort || ports[0] || '';
+    $('fGain').value = s.settings.gainDb;
+    $('gainVal').textContent = (+s.settings.gainDb).toFixed(1) + ' dB';
+  }
+
+  renderList(s);
+  renderClock(s);
+}
+
+// position now: the program sends it 10 times a second; in between the page runs on at play speed, so tenths tick evenly
+// It never steps back by a small amount for the same cue (a new message can be a few ms "older" than the extrapolated value);
+// a real jump (> 400 ms back: seek, Last 10 s backwards, new cue) is shown at once.
+let shownPos = 0, shownCue = null;
+function livePos(s) {
+  let p = s.positionMs;
+  if (s.state === 'playing') p += Math.min(300, performance.now() - (s.receivedAt || 0));
+  if (s.lengthMs > 0) p = Math.min(p, s.lengthMs);
+  const key = s.currentId + '|' + s.jump;
+  if (key === shownCue && p < shownPos && shownPos - p < 400) p = shownPos;
+  shownCue = key; shownPos = p;
+  return p;
+}
+setInterval(() => { if (S) renderClock(S); }, 40);
+
+// ---------- audio level meters (after OMTplay's AudioLevelMeter: sample peaks, dBFS -60..0, segments, peak hold, clip) ----------
+const MT = { levels: Array(8).fill(-60), holds: Array(8).fill(-60), holdUntil: Array(8).fill(0), clipUntil: Array(8).fill(0), ch: 0, last: performance.now() };
+const toDb = p => (p > 0 && isFinite(p)) ? Math.max(-60, Math.min(0, 20 * Math.log10(p))) : -60;
+function meterUpdate(peaks) {
+  const now = performance.now(), elapsed = (now - MT.last) / 1000;
+  MT.last = now;
+  const n = Math.min(8, peaks.length);
+  for (let c = 0; c < 8; c++) {
+    if (c >= n || c >= MT.ch) { MT.levels[c] = MT.holds[c] = -60; MT.holdUntil[c] = MT.clipUntil[c] = 0; }
+    if (c >= n) continue;
+    const db = toDb(peaks[c]);
+    MT.levels[c] = Math.max(db, Math.max(-60, MT.levels[c] - elapsed * 30));          // falls 30 dB/s
+    if (db >= MT.holds[c]) { MT.holds[c] = db; MT.holdUntil[c] = now + 1000; }        // peak hold 1 s
+    else if (now > MT.holdUntil[c]) MT.holds[c] = Math.max(MT.levels[c], MT.holds[c] - elapsed * 20);
+    if (peaks[c] >= 1) MT.clipUntil[c] = now + 1000;                                   // clip shown 1 s
+  }
+  MT.ch = n;
+  meterDraw();
+}
+function meterDraw() {
+  const cv = $('meter'), dpr = window.devicePixelRatio || 1;
+  const W = Math.round(cv.clientWidth * dpr), H = Math.round(cv.clientHeight * dpr);
+  if (!W || !H) return;
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  const g = cv.getContext('2d');
+  g.clearRect(0, 0, W, H);
+  const n = MT.ch, s = dpr, font = 10 * s;
+  g.font = `${font}px Segoe UI, sans-serif`; g.textBaseline = 'middle';
+  const scaleW = 26 * s, header = 16 * s, bottom = H - 14 * s, barH = bottom - header;
+  g.fillStyle = '#d2e4fa';
+  g.textAlign = 'left'; g.fillText('dBFS', 2 * s, 7 * s);
+  g.textAlign = 'right';
+  for (const db of [0, -6, -12, -18, -24, -36, -48, -60]) g.fillText(String(db), scaleW - 3 * s, bottom - (db + 60) / 60 * barH);
+  if (!n) { g.textAlign = 'center'; g.fillText('no audio', scaleW + (W - scaleW) / 2, header + barH / 2); return; }
+  const colW = (W - scaleW - 2 * s) / n, now = performance.now();
+  for (let c = 0; c < n; c++) {
+    const x = scaleW + c * colW, w = Math.max(1, colW - 3 * s);
+    g.fillStyle = '#000'; g.fillRect(x, header, w, barH);
+    const fill = (MT.levels[c] + 60) / 60 * barH, step = Math.max(2, 4 * s), seg = Math.max(1, 3 * s);
+    for (let off = 0; off < fill; off += step) {
+      const db = -60 + 60 * off / barH;
+      g.fillStyle = db >= -6 ? '#ff3b30' : db >= -18 ? '#ffd84a' : '#32cd32';
+      g.fillRect(x, header + barH - off - Math.min(seg, fill - off), w, Math.min(seg, fill - off));
+    }
+    if (MT.holds[c] > -60) {
+      const y = header + barH - 1 - Math.min(barH - 1, (MT.holds[c] + 60) / 60 * barH);
+      g.fillStyle = '#ffffff'; g.fillRect(x, y, w, Math.max(1, s));
+    }
+    g.fillStyle = now < MT.clipUntil[c] ? '#ff3b30' : '#555a66';
+    g.fillRect(x, header - 6 * s, w, Math.max(2, 3 * s));
+    g.fillStyle = '#ffffff'; g.textAlign = 'center';
+    g.fillText(String(c + 1), x + w / 2, bottom + 7 * s);
+  }
+}
+
+// Last 10 s (Peter): once a cue reaches them, its end time is taken once and the countdown runs on this PC's clock only - even seconds,
+// no more libVLC values. Pause freezes it, play continues from there; a jump (Last 10 s, seek, other cue) starts it again.
+// Every seek (click in the bar, Last 10 s) and every new cue changes s.jump: the countdown then starts again from the new place,
+// however small the jump is (Peter: moved by hand from 9 to 7 s, the countdown must follow).
+let cd = { cue: null, jump: null, endAt: 0, frozen: null };
+function remainingMs(s, pos) {
+  const fromPlayer = s.lengthMs - pos;
+  const now = performance.now();
+  if (s.currentId !== cd.cue || s.jump !== cd.jump || !(s.lengthMs > 0) || (s.state !== 'playing' && s.state !== 'paused'))
+    cd = { cue: s.currentId, jump: s.jump, endAt: 0, frozen: null };
+  if (cd.endAt) {
+    if (s.state === 'paused') { cd.frozen = Math.max(0, cd.endAt - now); cd.endAt = 0; }
+  } else if (cd.frozen !== null) {
+    if (s.state === 'playing') { cd.endAt = now + cd.frozen; cd.frozen = null; }
+  }
+  let r = cd.endAt ? cd.endAt - now : cd.frozen;
+  if (r !== null && Math.abs(r - fromPlayer) > 1500) { cd.endAt = 0; cd.frozen = null; r = null; }   // jumped
+  if (r === null) {
+    if (fromPlayer > 10000) return fromPlayer;
+    if (s.state === 'playing') cd.endAt = now + fromPlayer; else cd.frozen = fromPlayer;
+    r = fromPlayer;
+  }
+  return Math.max(0, r);
+}
+
+function renderClock(s) {
+  const cur = s.cues.find(c => c.id === s.currentId);
+  const playing = s.state === 'playing' || s.state === 'paused';
+  const pos = livePos(s);
+  const remainMs = playing && s.lengthMs > 0 ? remainingMs(s, pos) : 0;
+  const badge = s.fading ? '⇄ FADING' :
+    ({ playing: '▶ PLAYING', paused: '❚❚ PAUSED', ended: '■ HOLD LAST PICTURE', stopped: 'STOPPED · BLACK', starting: '… STARTING' }[s.state] || s.state.toUpperCase());
+  // stopped with a cue chosen: its first frame is on the outputs (NDI/OMT and preview), ready for GO
+  $('badge').textContent = s.state === 'stopped' && s.cuedId ? '■ CUED · FIRST FRAME ON AIR' : badge;
+  $('nowName').textContent = cur ? cur.name : '';
+  if (playing && s.lengthMs > 0) {
+    $('remain').textContent = '-' + fmt(remainMs, true);
+    $('elapsed').textContent = fmt(pos) + ' / ' + fmt(s.lengthMs);
+    $('seekFill').style.width = (100 * pos / s.lengthMs).toFixed(2) + '%';
+  } else {
+    $('remain').textContent = '--:--.-';
+    $('elapsed').textContent = '--:-- / --:--';
+    $('seekFill').style.width = s.state === 'ended' ? '100%' : '0';
+  }
+  // countdown 10 ... 1 in the last 10 s (not for Loop cues, they do not end); the remaining time turns yellow and bold as well
+  const counting = playing && s.lengthMs > 0 && remainMs <= 10000 && !(cur && (cur.endAction === 'loop' || cur.endAction === 'loopfade'));
+  $('countdown').classList.toggle('on', counting);
+  if (counting) $('countdown').textContent = Math.max(1, Math.ceil(remainMs / 1000));
+  $('remain').classList.toggle('final', counting);
+  // "Last 10 s": only for a clip on air that is longer than 10 s; greyed out once inside the last 10 s
+  $('btnLast10').classList.toggle('off', !(playing && s.lengthMs > 10000));
+  $('btnLast10').disabled = !(playing && pos < s.lengthMs - 10000);
+  $('btnPause').textContent = s.state === 'paused' ? '▶' : '❚❚';
+  $('btnPause').title = s.state === 'paused' ? 'Continue (P)' : 'Pause (P)';
+  const next = s.cues.find(c => c.id === s.selectedId) || s.cues[0];
+  $('goName').textContent = next ? next.name : '—';
+  $('goLabel').textContent = s.state === 'paused' ? 'PAUSED' : (s.state === 'playing' || s.state === 'starting') ? 'PLAYING' : 'GO';
+
+  // progress bar of the playing row
+  document.querySelectorAll('.cue .prog').forEach(p => p.style.width = '0');
+  const row = document.querySelector(`.cue[data-id="${s.currentId}"] .prog`);
+  if (row && playing && s.lengthMs > 0) row.style.width = (100 * pos / s.lengthMs).toFixed(2) + '%';
+}
+
+let lastListSel = null;
+function renderList(s) {
+  const key = JSON.stringify([s.cues, s.currentId, s.selectedId, s.state, s.incomingId, s.fading, s.prerolledId, s.cuedId]);
+  if (key === listKey) return;
+  listKey = key;
+  const box = $('cues');
+  if (!s.cues.length) {
+    box.innerHTML = '<div class="empty">No cues yet.<br>Click <b>+ Add media…</b> or drag files or folders from Explorer here.</div>';
+    return;
+  }
+  const sel = s.selectedId || s.cues[0].id;
+  const selChanged = sel !== lastListSel;
+  lastListSel = sel;
+  queueMicrotask(() => {
+    // the chosen cue (NEXT) moved, e.g. arrow keys, Stop or the end of a clip: keep it in view; manual scrolling is left alone otherwise
+    if (selChanged) box.querySelector('.cue.selected')?.scrollIntoView({ block: 'nearest' });
+  });
+  box.innerHTML = s.cues.map((c, i) => {
+    const playing = c.id === s.currentId && s.state !== 'stopped';
+    const tags = (playing ? `<div class="tag play">${s.state === 'paused' ? '❚❚ PAUSE' : s.state === 'ended' ? '■ HOLD' : '▶ PLAY'}</div>` : '') +
+                 (c.id === s.incomingId ? `<div class="tag play">${s.fading ? '⇄ FADE IN' : '… START'}</div>` : '') +
+                 (c.id === s.cuedId ? '<div class="tag play">■ CUED</div>' : c.id === s.prerolledId ? '<div class="tag ready">◆ READY</div>' : '') +
+                 (c.id === sel ? '<div class="tag next">● NEXT</div>' : '') +
+                 (c.missing ? '<div class="tag miss">⚠ MISSING</div>' : '') +
+                 (c.unsupported ? `<div class="tag miss" title="${esc(c.unsupported)}">⚠ NO PICTURE</div>` : '');
+    const aopts = (s.audioOptions[c.id] || []).map(o => `<option value="${o.value}" ${c.audio === o.value ? 'selected' : ''}>${o.label}</option>`).join('');
+    const opts = Object.entries(END_LABELS).map(([v, l]) => `<option value="${v}" ${c.endAction === v ? 'selected' : ''}>${l}</option>`).join('');
+    return `<div class="cue ${c.id === sel ? 'selected' : ''} ${playing ? 'playing' : ''} ${c.missing ? 'missing' : ''}" data-id="${c.id}" draggable="true">
+      <span class="num">${i + 1}</span>
+      <span>${tags}</span>
+      <span class="name" title="${esc(c.path)}">${esc(c.name)}<small>${esc(c.path)}</small></span>
+      <span class="dur">${c.durationMs ? fmt(c.durationMs) : '…'}</span>
+      <select data-act="audio" title="Audio: channels or track of the file (applies at once)">${aopts}</select>
+      <select data-act="end" title="At the end">${opts}</select>
+      <span class="mv"><button data-act="up" title="Move up (Alt+↑)" ${i === 0 ? 'disabled' : ''}>▲</button><button data-act="down" title="Move down (Alt+↓)" ${i === s.cues.length - 1 ? 'disabled' : ''}>▼</button></span>
+      <button class="del" data-act="del" title="Remove from list">×</button>
+      <div class="prog"></div>
+    </div>`;
+  }).join('');
+}
+
+// ---------- list interaction ----------
+const cuesBox = $('cues');
+cuesBox.addEventListener('click', e => {
+  const row = e.target.closest('.cue'); if (!row) return;
+  if (e.target.dataset.act === 'del') { send('remove', { id: row.dataset.id }); return; }
+  if (e.target.dataset.act === 'up' || e.target.dataset.act === 'down') { send('move', { id: row.dataset.id, dir: e.target.dataset.act === 'up' ? -1 : 1 }); return; }
+  if (e.target.tagName === 'SELECT') return;
+  send('select', { id: row.dataset.id });
+});
+cuesBox.addEventListener('dblclick', e => {
+  const row = e.target.closest('.cue'); if (!row || e.target.closest('select,button')) return;
+  send('play', { id: row.dataset.id });
+});
+cuesBox.addEventListener('change', e => {
+  const row = e.target.closest('.cue');
+  if (row && e.target.dataset.act === 'end') send('endAction', { id: row.dataset.id, action: e.target.value });
+  if (row && e.target.dataset.act === 'audio') send('audio', { id: row.dataset.id, value: e.target.value });
+});
+
+// reorder by dragging rows; files from Explorer are added at the drop position
+cuesBox.addEventListener('dragstart', e => {
+  const row = e.target.closest('.cue'); if (!row) return;
+  dragId = row.dataset.id; row.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', dragId);
+});
+cuesBox.addEventListener('dragend', () => { dragId = null; clearDrop(); });
+function clearDrop() { document.querySelectorAll('.dragging,.dropbefore').forEach(el => el.classList.remove('dragging', 'dropbefore')); cuesBox.classList.remove('droptarget'); }
+function rowAt(e) { return e.target.closest && e.target.closest('.cue'); }
+document.addEventListener('dragover', e => {
+  e.preventDefault();
+  const isFiles = e.dataTransfer.types.includes('Files');
+  e.dataTransfer.dropEffect = isFiles ? 'copy' : 'move';
+  document.querySelectorAll('.dropbefore').forEach(el => el.classList.remove('dropbefore'));
+  const row = rowAt(e);
+  if (row && row.dataset.id !== dragId) row.classList.add('dropbefore');
+  cuesBox.classList.toggle('droptarget', isFiles && cuesBox.contains(e.target));
+});
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  const row = rowAt(e);
+  const before = row ? row.dataset.id : '';
+  if (e.dataTransfer.files && e.dataTransfer.files.length) {
+    window.chrome.webview.postMessageWithAdditionalObjects({ cmd: 'drop', before }, e.dataTransfer.files);
+  } else if (dragId && S) {
+    const ids = S.cues.map(c => c.id).filter(id => id !== dragId);
+    const at = before ? ids.indexOf(before) : ids.length;
+    ids.splice(at < 0 ? ids.length : at, 0, dragId);
+    send('order', { ids });
+  }
+  clearDrop();
+});
+
+// ---------- transport ----------
+$('btnAdd').onclick = () => send('addFiles');
+$('btnNew').onclick = () => send('newList');
+$('btnOpen').onclick = () => send('openList');
+$('btnSave').onclick = () => send('saveList');
+$('btnSaveAs').onclick = () => send('saveListAs');
+$('btnGo').onclick = () => send('go');
+$('btnStop').onclick = () => send('stop');
+$('btnPause').onclick = () => send('pause');
+$('btnNext').onclick = () => send('next');
+$('btnPrev').onclick = () => send('prev');
+$('btnLast10').onclick = () => send('last10');
+$('seek').onclick = e => {
+  if (!S || !(S.lengthMs > 0)) return;
+  const r = e.currentTarget.getBoundingClientRect();
+  send('seek', { ms: Math.round(S.lengthMs * (e.clientX - r.left) / r.width) });
+};
+
+// ---------- settings ----------
+['fFormat', 'fName', 'fNdi', 'fOmt', 'fSdi', 'fSdiPort', 'fGain'].forEach(id => $(id).addEventListener('input', () => {
+  settingsDirty = true;
+  $('gainVal').textContent = (+$('fGain').value).toFixed(1) + ' dB';
+}));
+// the fade time belongs to the playlist: it applies at once (no Apply needed)
+$('fFade').addEventListener('change', () => { send('fade', { ms: +$('fFade').value }); $('fFade').blur(); });
+$('fMonitor').addEventListener('change', () => { send('monitor', { device: $('fMonitor').value }); $('fMonitor').blur(); });
+$('btnApply').onclick = () => {
+  send('settings', { format: $('fFormat').value, sourceName: $('fName').value, ndi: $('fNdi').checked, omt: $('fOmt').checked, sdi: $('fSdi').checked, sdiPort: $('fSdiPort').value, gainDb: +$('fGain').value });
+  settingsDirty = false;
+  flash('setMsg', 'Applied');
+};
+
+// ---------- keyboard ----------
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey && !e.altKey) {
+    const k = e.key.toLowerCase();
+    if (k === 's') { e.preventDefault(); send(e.shiftKey ? 'saveListAs' : 'saveList'); return; }
+    if (k === 'o') { e.preventDefault(); send('openList'); return; }
+    if (k === 'n') { e.preventDefault(); send('newList'); return; }
+  }
+  if (e.target.matches('input[type=text], select')) return;
+  if (!S) return;
+  const ids = S.cues.map(c => c.id);
+  const sel = S.selectedId && ids.includes(S.selectedId) ? S.selectedId : ids[0];
+  const i = ids.indexOf(sel);
+  switch (e.key) {
+    case ' ': e.preventDefault(); send('go'); break;
+    case 'Escape': send('stop'); break;
+    case 'p': case 'P': send('pause'); break;
+    case 'l': case 'L': send('last10'); break;
+    // Alt+arrow moves the chosen cue in the list, plain arrows choose
+    case 'ArrowDown': e.preventDefault(); if (e.altKey) { if (sel) send('move', { id: sel, dir: 1 }); } else if (i < ids.length - 1) send('select', { id: ids[i + 1] }); break;
+    case 'ArrowUp': e.preventDefault(); if (e.altKey) { if (sel) send('move', { id: sel, dir: -1 }); } else if (i > 0) send('select', { id: ids[i - 1] }); break;
+    case 'Enter': if (sel) send('play', { id: sel }); break;
+    case 'Delete': if (sel) send('remove', { id: sel }); break;
+  }
+});
+// buttons must not keep the focus (Space would press them again instead of GO)
+document.addEventListener('mouseup', () => { if (document.activeElement && document.activeElement.tagName === 'BUTTON') document.activeElement.blur(); });
+
+// clock like the other programs: date and time of this PC
+function clockTick() {
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const day = d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  $('clock').textContent = `${day}   ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+clockTick();
+setInterval(clockTick, 500);
+
+send('ready');
+</script>
+</body>
+</html>
