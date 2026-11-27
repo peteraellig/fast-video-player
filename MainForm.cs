@@ -223,6 +223,10 @@ internal sealed class MainForm : Form
                     });
                     break;
                 case "settings": ApplySettings(m); break;
+                case "openNdi":
+                    // fixed address only (NDI trademark notice on the page); opens in the default browser
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://ndi.video") { UseShellExecute = true });
+                    break;
                 case "monitor":
                     _store.Change(s => s.Settings.MonitorDevice = m.GetProperty("device").GetString() ?? "");
                     _engine.ApplyMonitor();

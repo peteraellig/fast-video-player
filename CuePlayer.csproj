@@ -12,9 +12,9 @@
     <SelfContained>false</SelfContained>
     <AssemblyName>CuePlayer</AssemblyName>
     <RootNamespace>CuePlayer</RootNamespace>
-    <Version>0.1.0.38</Version>
-    <AssemblyVersion>0.1.0.38</AssemblyVersion>
-    <FileVersion>0.1.0.38</FileVersion>
+    <Version>0.1.0.39</Version>
+    <AssemblyVersion>0.1.0.39</AssemblyVersion>
+    <FileVersion>0.1.0.39</FileVersion>
     <Authors>Peter Aellig</Authors>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>logo\fast_video_player.ico</ApplicationIcon>
