@@ -192,8 +192,9 @@
       <div class="form">
         <label for="fFormat">Format</label><select id="fFormat"></select>
         <label for="fName" class="l2">Name</label><input type="text" id="fName" maxlength="60" title="Source name for NDI and OMT">
-        <label>Send as</label><div class="row"><label><input type="checkbox" id="fNdi"> NDI</label><label><input type="checkbox" id="fOmt"> OMT</label><label><input type="checkbox" id="fSdi"> SDI</label></div>
-        <label for="fSdiPort" class="l2">SDI port</label><select id="fSdiPort" title="Blackmagic DeckLink / UltraStudio device"></select>
+        <label>Send as</label><div class="row wide"><label><input type="checkbox" id="fNdi"> NDI</label><label><input type="checkbox" id="fOmt"> OMT</label><label><input type="checkbox" id="fSdi"> SDI</label><label title="Full screen on a second monitor (HDMI, DisplayPort, ...)"><input type="checkbox" id="fHdmi"> HDMI</label></div>
+        <label for="fSdiPort">SDI port</label><select id="fSdiPort" title="Blackmagic DeckLink / UltraStudio device"></select>
+        <label for="fHdmiScreen" class="l2">HDMI screen</label><select id="fHdmiScreen" title="Monitor for the full-screen output (not the one with this window)"></select>
         <label for="fGain">Audio level</label><div class="row wide"><input type="range" id="fGain" min="-30" max="12" step="0.5" style="flex:1"><span id="gainVal" style="width:64px;text-align:right">0 dB</span><button id="btnApply">Apply</button></div>
         <label for="fMonitor">Monitor</label>
         <div class="row wide"><select id="fMonitor" style="flex:1;min-width:0" title="Listen to the output sound on this PC (applies at once)"></select></div>
@@ -276,6 +277,7 @@ function render(s) {
   const sdiText = s.sdi.status === 'on' ? 'on <b>' + esc(s.sdi.port) + '</b>' + (s.sdi.late || s.sdi.dropped ? ` (${s.sdi.late} late, ${s.sdi.dropped} dropped)` : '') : esc(s.sdi.status);
   $('outs').innerHTML = (s.omt.address ? 'OMT <b>' + esc(s.omt.address) + '</b> · ' : 'OMT ' + esc(s.omt.status) + ' · ') +
                         'NDI ' + esc(s.ndi.status === 'on' ? 'on' : s.ndi.status) + ' · SDI ' + sdiText +
+                        ' · HDMI ' + (s.hdmi.status.startsWith('on') ? esc(s.hdmi.status) + ' <b>' + esc(s.hdmi.name) + '</b>' : esc(s.hdmi.status)) +
                         (s.monitor.status !== 'on' && s.monitor.status !== 'off' ? ' · Monitor ' + esc(s.monitor.status) : '');
   $('listMsg').textContent = s.message || '';
   $('listName').textContent = s.playlist.name;
@@ -312,6 +314,12 @@ function render(s) {
       : '<option value="">no device</option>';
     if ($('fSdiPort').dataset.html !== html) { $('fSdiPort').innerHTML = html; $('fSdiPort').dataset.html = html; }   // rebuilt only when the list changes
     $('fSdiPort').value = s.settings.sdiPort || ports[0] || '';
+    $('fHdmi').checked = s.settings.hdmi;
+    const scr = s.hdmi.screens.slice();
+    if (s.settings.hdmiScreen && !scr.some(x => x.id === s.settings.hdmiScreen)) scr.push({ id: s.settings.hdmiScreen, name: s.settings.hdmiScreen.replace(/^\\\\\.\\/, '') + ' (not found)' });
+    const shtml = scr.length ? scr.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('') : '<option value="">no second monitor</option>';
+    if ($('fHdmiScreen').dataset.html !== shtml) { $('fHdmiScreen').innerHTML = shtml; $('fHdmiScreen').dataset.html = shtml; }
+    $('fHdmiScreen').value = s.settings.hdmiScreen || (scr[0] && scr[0].id) || '';
     $('fGain').value = s.settings.gainDb;
     $('gainVal').textContent = (+s.settings.gainDb).toFixed(1) + ' dB';
   }
@@ -573,7 +581,7 @@ $('seek').onclick = e => {
 };
 
 // ---------- settings ----------
-['fFormat', 'fName', 'fNdi', 'fOmt', 'fSdi', 'fSdiPort', 'fGain'].forEach(id => $(id).addEventListener('input', () => {
+['fFormat', 'fName', 'fNdi', 'fOmt', 'fSdi', 'fSdiPort', 'fHdmi', 'fHdmiScreen', 'fGain'].forEach(id => $(id).addEventListener('input', () => {
   settingsDirty = true;
   $('gainVal').textContent = (+$('fGain').value).toFixed(1) + ' dB';
 }));
@@ -581,7 +589,7 @@ $('seek').onclick = e => {
 $('fFade').addEventListener('change', () => { send('fade', { ms: +$('fFade').value }); $('fFade').blur(); });
 $('fMonitor').addEventListener('change', () => { send('monitor', { device: $('fMonitor').value }); $('fMonitor').blur(); });
 $('btnApply').onclick = () => {
-  send('settings', { format: $('fFormat').value, sourceName: $('fName').value, ndi: $('fNdi').checked, omt: $('fOmt').checked, sdi: $('fSdi').checked, sdiPort: $('fSdiPort').value, gainDb: +$('fGain').value });
+  send('settings', { format: $('fFormat').value, sourceName: $('fName').value, ndi: $('fNdi').checked, omt: $('fOmt').checked, sdi: $('fSdi').checked, sdiPort: $('fSdiPort').value, hdmi: $('fHdmi').checked, hdmiScreen: $('fHdmiScreen').value, gainDb: +$('fGain').value });
   settingsDirty = false;
   flash('setMsg', 'Applied');
 };

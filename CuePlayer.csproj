@@ -12,9 +12,9 @@
     <SelfContained>false</SelfContained>
     <AssemblyName>CuePlayer</AssemblyName>
     <RootNamespace>CuePlayer</RootNamespace>
-    <Version>0.1.0.35</Version>
-    <AssemblyVersion>0.1.0.35</AssemblyVersion>
-    <FileVersion>0.1.0.35</FileVersion>
+    <Version>0.1.0.38</Version>
+    <AssemblyVersion>0.1.0.38</AssemblyVersion>
+    <FileVersion>0.1.0.38</FileVersion>
     <Authors>Peter Aellig</Authors>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>logo\fast_video_player.ico</ApplicationIcon>
@@ -34,6 +34,8 @@
     <PackageReference Include="FFmpeg.AutoGen" Version="8.1.0" />
     <!-- local audio monitor (WASAPI), MIT licence -->
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <!-- HDMI output: full-screen Direct3D 11 window on a second monitor, MIT licence -->
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
   </ItemGroup>
 
   <ItemGroup>
@@ -54,5 +56,25 @@
       <Private>true</Private>
     </Reference>
   </ItemGroup>
+
+  <!--
+    libVLC plugin cache (plugins.dat). libVLC 3 does not write it itself; without it every start opens all ~320 plugin DLLs to read
+    what they can do (warm: 0.2 s, cold after a reboot / new build / virus scan: 10-35 s seen). With it only ~70 are opened.
+    vlc-cache-gen.exe (from VLC, used at build time only, not shipped) is run next to OUR libvlccore.dll so the cache matches 3.0.21.
+  -->
+  <Target Name="VlcPluginCacheBuild" AfterTargets="Build" Condition="Exists('$(OutDir)libvlc\win-x64\plugins')">
+    <PropertyGroup><_VlcDirB>$([System.IO.Path]::GetFullPath('$(OutDir)libvlc\win-x64'))</_VlcDirB></PropertyGroup>
+    <Copy SourceFiles="third_party\vlc-tools\vlc-cache-gen.exe" DestinationFolder="$(_VlcDirB)" />
+    <Exec Command="&quot;$(_VlcDirB)\vlc-cache-gen.exe&quot; &quot;$(_VlcDirB)\plugins&quot;" WorkingDirectory="$(_VlcDirB)" ContinueOnError="true" />
+    <Delete Files="$(_VlcDirB)\vlc-cache-gen.exe" />
+    <Message Importance="high" Text="libVLC plugin cache: $(_VlcDirB)\plugins\plugins.dat" />
+  </Target>
+  <Target Name="VlcPluginCachePublish" AfterTargets="Publish" Condition="Exists('$(PublishDir)libvlc\win-x64\plugins')">
+    <PropertyGroup><_VlcDirP>$([System.IO.Path]::GetFullPath('$(PublishDir)libvlc\win-x64'))</_VlcDirP></PropertyGroup>
+    <Copy SourceFiles="third_party\vlc-tools\vlc-cache-gen.exe" DestinationFolder="$(_VlcDirP)" />
+    <Exec Command="&quot;$(_VlcDirP)\vlc-cache-gen.exe&quot; &quot;$(_VlcDirP)\plugins&quot;" WorkingDirectory="$(_VlcDirP)" ContinueOnError="true" />
+    <Delete Files="$(_VlcDirP)\vlc-cache-gen.exe" />
+    <Message Importance="high" Text="libVLC plugin cache: $(_VlcDirP)\plugins\plugins.dat" />
+  </Target>
 
 </Project>

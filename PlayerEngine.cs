@@ -104,6 +104,11 @@ internal sealed class PlayerEngine : IDisposable
     private SdiOutput? _sdi;
     private volatile string _sdiStatus = "off";
     private List<string> _sdiPorts = new();
+    private HdmiOutput? _hdmi;
+    private volatile string _hdmiStatus = "off";
+    private List<HdmiOutput.ScreenInfo> _hdmiScreens = new();
+    /// <summary>The monitor the control window is on (set by the window): never offered as HDMI output.</summary>
+    public volatile string? ControlScreen = Screen.PrimaryScreen?.DeviceName;
     private volatile AudioMonitor? _monitor;
     private string _monitorId = "", _monitorStatus = "off";
     private List<(string id, string name)> _monitorDevices = new();
@@ -144,6 +149,7 @@ internal sealed class PlayerEngine : IDisposable
             if (e.Message?.Contains("could not decode the format", StringComparison.OrdinalIgnoreCase) == true) _lastDecodeError = e.Message;
         };
         LoadVlcClock();
+        Log.Step("libVLC instance created");
 
         _decks = [new Deck(_vlc, "A"), new Deck(_vlc, "B")];
         // a third, small player that only checks whether a new file's picture can be decoded (never on air)
@@ -541,6 +547,7 @@ internal sealed class PlayerEngine : IDisposable
         _ndi?.Dispose(); _ndi = null;
         _omt?.Dispose(); _omt = null;
         _sdi?.Dispose(); _sdi = null;
+        _hdmi?.Dispose(); _hdmi = null;
         StopNow();
 
         var settings = _store.Read(s => s.Settings);
@@ -562,6 +569,7 @@ internal sealed class PlayerEngine : IDisposable
         _previewBusy = false;
 
         string name = string.IsNullOrWhiteSpace(settings.SourceName) ? ShowSettings.DefaultSourceName : settings.SourceName.Trim();
+        Log.Step("outputs: buffers");
         _ndiStatus = "off";
         if (settings.Ndi)
         {
@@ -576,14 +584,17 @@ internal sealed class PlayerEngine : IDisposable
                 }
             }
         }
+        Log.Step($"outputs: NDI {_ndiStatus}");
         _omtStatus = "off";
         if (settings.Omt)
         {
             try { _omt = new OmtSender(name); _omtStatus = "on"; }
             catch (Exception e) { _omtStatus = "failed: " + e.Message; }
         }
+        Log.Step($"outputs: OMT {_omtStatus}");
         // SDI: the ports are looked up again on every rebuild (an UltraStudio can be plugged in later)
         _sdiPorts = SdiOutput.Ports();
+        Log.Step($"outputs: SDI ports listed ({_sdiPorts.Count})");
         _sdiStatus = "off";
         if (settings.Sdi)
         {
@@ -594,14 +605,32 @@ internal sealed class PlayerEngine : IDisposable
                 catch (Exception e) { _sdiStatus = e.Message; Log.Write("SDI failed: " + e); }
             }
         }
-        Log.Write($"outputs {fmt.Id} name '{name}': NDI {_ndiStatus}, OMT {_omtStatus} {_omt?.Address}, SDI {_sdiStatus} {_sdi?.PortName}");
-        ApplyMonitorNow(force: false);   // stays open across output changes; opened here at start
-
+        Log.Step($"outputs: SDI {_sdiStatus}");
+        // HDMI: full screen on a monitor other than the control window's
+        _hdmiScreens = HdmiOutput.Screens(ControlScreen);
+        _hdmiStatus = "off";
+        if (settings.Hdmi)
+        {
+            var scr = _hdmiScreens.FirstOrDefault(s => s.Id == settings.HdmiScreen) ?? (settings.HdmiScreen == "" ? _hdmiScreens.FirstOrDefault() : null);
+            if (scr == null) _hdmiStatus = _hdmiScreens.Count == 0 ? "no second monitor" : "monitor not found";
+            else
+            {
+                try { _hdmi = new HdmiOutput(scr.Id, fmt); _hdmiStatus = "on"; }
+                catch (Exception e) { _hdmiStatus = "failed: " + e.Message; Log.Write("HDMI failed: " + e); }
+            }
+        }
+        Log.Step($"outputs: HDMI {_hdmiStatus}");
+        Log.Write($"outputs {fmt.Id} name '{name}': NDI {_ndiStatus}, OMT {_omtStatus} {_omt?.Address}, SDI {_sdiStatus} {_sdi?.PortName}, HDMI {_hdmiStatus} {_hdmi?.Name}");
         _sendStop = new CancellationTokenSource();
         var token = _sendStop.Token;
-        var ndi = _ndi; var omt = _omt; var sdi = _sdi;
-        _sendThread = new Thread(() => SendLoop(fmt, ndi, omt, sdi, token)) { IsBackground = true, Name = "output", Priority = ThreadPriority.AboveNormal };
+        var ndi = _ndi; var omt = _omt; var sdi = _sdi; var hdmi = _hdmi;
+        _sendThread = new Thread(() => SendLoop(fmt, ndi, omt, sdi, hdmi, token)) { IsBackground = true, Name = "output", Priority = ThreadPriority.AboveNormal };
         _sendThread.Start();
+        Log.Step("outputs: running");
+
+        // after the output loop started: listing the Windows audio devices takes 0.6-1.3 s (measured), the outputs need not wait for it
+        ApplyMonitorNow(force: false);   // stays open across output changes; opened here at start
+        Log.Step($"outputs: audio monitor {_monitorStatus}");
     }
 
     private static unsafe void FillBlack(IntPtr p, int size)
@@ -613,7 +642,7 @@ internal sealed class PlayerEngine : IDisposable
     [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint ms);
     [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint ms);
 
-    private void SendLoop(OutputFormat fmt, NdiSender? ndi, OmtSender? omt, SdiOutput? sdi, CancellationToken ct)
+    private void SendLoop(OutputFormat fmt, NdiSender? ndi, OmtSender? omt, SdiOutput? sdi, HdmiOutput? hdmi, CancellationToken ct)
     {
         timeBeginPeriod(1);
         try
@@ -727,6 +756,7 @@ internal sealed class PlayerEngine : IDisposable
                 try
                 {
                     sdi?.SendVideo(pic);
+                    hdmi?.Send(pic);
                     omt?.SendVideo(pic, fmt, ts);
                     ndi?.SendVideo(pic, fmt);
                     // a new picture also goes to the preview, unless it is still busy with the last one
@@ -930,6 +960,14 @@ internal sealed class PlayerEngine : IDisposable
             meter = black ? Array.Empty<float>() : a.TakePeaks(),
             ndi = new { status = _ndiStatus, connections = SafeConnections(() => _ndi?.Connections ?? 0) },
             omt = new { status = _omtStatus, address = _omt?.Address ?? "", connections = SafeConnections(() => _omt?.Connections ?? 0) },
+            hdmi = new
+            {
+                status = _hdmi != null ? _hdmi.Status : _hdmiStatus,
+                name = _hdmi?.Name ?? "",
+                screens = _hdmiScreens.Select(s => new { id = s.Id, name = s.Name }),
+                repeated = _hdmi?.Repeated ?? 0,
+                dropped = _hdmi?.Dropped ?? 0,
+            },
             monitor = new { status = _monitorStatus, devices = _monitorDevices.Select(d => new { d.id, d.name }) },
             sdi = new { status = _sdiStatus, port = _sdi?.PortName ?? "", ports = _sdiPorts, late = _sdi?.Late ?? 0, dropped = _sdi?.Dropped ?? 0 },
             settings,
@@ -956,6 +994,16 @@ internal sealed class PlayerEngine : IDisposable
     }
 
     /// <summary>Position of the cue on air the way the window gets it (test helper for the countdown measurement).</summary>
+    /// <summary>Test helper: the HDMI render thread reads back the centre pixel of what it drew.</summary>
+    public string HdmiCheck()
+    {
+        var h = _hdmi;
+        if (h == null) return "no hdmi";
+        h.GrabCenter = true;
+        for (int i = 0; i < 50 && h.GrabCenter; i++) Thread.Sleep(10);
+        return $"{h.CenterPixel}, presented {h.Presented}, repeated {h.Repeated}, dropped {h.Dropped}";
+    }
+
     /// <summary>Test helper: FFmpeg sound diagnostics of the deck on air.</summary>
     public string AudioStats() => Active().FfmpegAudioStats;
 
@@ -1013,7 +1061,7 @@ internal sealed class PlayerEngine : IDisposable
         _sendStop?.Cancel();
         _sendThread?.Join(2000);
         // the DeckLink device was opened on the command thread (MTA); COM refuses it from the window thread (STA): free it there
-        try { _commands.Add(() => { _sdi?.Dispose(); _sdi = null; var m = _monitor; _monitor = null; m?.Dispose(); }); } catch (InvalidOperationException) { }
+        try { _commands.Add(() => { _sdi?.Dispose(); _sdi = null; _hdmi?.Dispose(); _hdmi = null; var m = _monitor; _monitor = null; m?.Dispose(); }); } catch (InvalidOperationException) { }
         _commands.CompleteAdding();
         _commandThread.Join(2000);
         foreach (var d in _decks) d.Dispose();

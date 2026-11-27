@@ -25,6 +25,10 @@ fast video player (CuePlayer) by Peter Aellig uses the following components.
    Interop.DeckLinkAPI.dll is the .NET type library import of its DeckLinkAPI64.dll. DeckLink and UltraStudio are
    trademarks of Blackmagic Design Pty. Ltd.
 
+3c. Vortice.Windows (Vortice.Direct3D11, Vortice.DXGI, Vortice.DirectX, Vortice.Mathematics 3.8.3)
+   HDMI / monitor output through Direct3D 11. MIT licence, Copyright (c) Amer Koleci and contributors,
+   https://github.com/amerkoleci/Vortice.Windows
+
 3b. NAudio (NAudio.Core, NAudio.Wasapi 2.2.1)
    Listening to the output sound on a Windows audio device. MIT licence, Copyright (c) Mark Heath and contributors,
    https://github.com/naudio/NAudio

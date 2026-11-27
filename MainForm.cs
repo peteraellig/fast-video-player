@@ -46,6 +46,8 @@ internal sealed class MainForm : Form
         Controls.Add(_web);
         _timer.Tick += (_, _) => PushState();
         Load += async (_, _) => { FitToScreen(); ProbeMissing(); await InitWebAsync(); };
+        // the HDMI output never goes onto the monitor with this window (looked up again on every Apply)
+        Move += (_, _) => _engine.ControlScreen = Screen.FromControl(this).DeviceName;
         FormClosing += OnClosing;
         _engine.PreviewReady += OnPreview;
     }
@@ -69,8 +71,11 @@ internal sealed class MainForm : Form
 
     private async Task InitWebAsync()
     {
+        Log.Step("window shown, starting WebView2");
         _env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(ShowStore.Folder, "webview"));
+        Log.Step("WebView2 environment");
         await _web.EnsureCoreWebView2Async(_env);
+        Log.Step("WebView2 ready");
         var core = _web.CoreWebView2;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.AreDefaultContextMenusEnabled = false;
@@ -165,7 +170,7 @@ internal sealed class MainForm : Form
             string Str(string name) => m.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
             switch (cmd)
             {
-                case "ready": _ready = true; SetupPreviewBuffer(); PushState(); break;
+                case "ready": if (!_ready) Log.Step("page loaded and running"); _ready = true; SetupPreviewBuffer(); PushState(); break;
                 case "go": _engine.Go(); break;
                 case "stop": _engine.Stop(); break;
                 case "pause": _engine.TogglePause(); break;
@@ -310,7 +315,7 @@ internal sealed class MainForm : Form
 
     private void ApplySettings(JsonElement m)
     {
-        var old = _store.Read(s => new ShowSettings { Format = s.Settings.Format, SourceName = s.Settings.SourceName, Ndi = s.Settings.Ndi, Omt = s.Settings.Omt, Sdi = s.Settings.Sdi, SdiPort = s.Settings.SdiPort, MonitorDevice = s.Settings.MonitorDevice, GainDb = s.Settings.GainDb });
+        var old = _store.Read(s => new ShowSettings { Format = s.Settings.Format, SourceName = s.Settings.SourceName, Ndi = s.Settings.Ndi, Omt = s.Settings.Omt, Sdi = s.Settings.Sdi, SdiPort = s.Settings.SdiPort, MonitorDevice = s.Settings.MonitorDevice, Hdmi = s.Settings.Hdmi, HdmiScreen = s.Settings.HdmiScreen, GainDb = s.Settings.GainDb });
         var n = new ShowSettings
         {
             Format = OutputFormat.Find(m.GetProperty("format").GetString()).Id,
@@ -320,11 +325,13 @@ internal sealed class MainForm : Form
             Sdi = m.TryGetProperty("sdi", out var sd) && sd.GetBoolean(),
             SdiPort = m.TryGetProperty("sdiPort", out var sp) ? sp.GetString() ?? "" : old.SdiPort,
             MonitorDevice = old.MonitorDevice,   // set on its own ("monitor" message), no Apply needed
+            Hdmi = m.TryGetProperty("hdmi", out var hd) && hd.GetBoolean(),
+            HdmiScreen = m.TryGetProperty("hdmiScreen", out var hs) ? hs.GetString() ?? "" : old.HdmiScreen,
             GainDb = Math.Clamp(m.GetProperty("gainDb").GetDouble(), -60, 12),
         };
         _store.Change(s => s.Settings = n);
         _engine.SetGain(n.GainDb);
-        bool restart = n.Format != old.Format || n.SourceName != old.SourceName || n.Ndi != old.Ndi || n.Omt != old.Omt || n.Sdi != old.Sdi || n.SdiPort != old.SdiPort;
+        bool restart = n.Format != old.Format || n.SourceName != old.SourceName || n.Ndi != old.Ndi || n.Omt != old.Omt || n.Sdi != old.Sdi || n.SdiPort != old.SdiPort || n.Hdmi != old.Hdmi || n.HdmiScreen != old.HdmiScreen;
         if (restart)
         {
             if (IsPlaying() && MessageBox.Show(this, "Changing the output stops the cue that is playing. Continue?", AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)

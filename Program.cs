@@ -18,6 +18,9 @@ internal static class Program
         // console modes for testing: --probe ADDRESS [seconds] [omt|ndi], --test FILE [seconds] [format]
         if (args.Length > 0 && (args[0] == "--probe" || args[0] == "--test" || args[0] == "--duration" || args[0] == "--sdi-in" || args[0] == "--vmx"))
         {
+            // like the window (csproj ApplicationHighDpiMode): real pixel sizes of the monitors, also for the HDMI test
+            bool dpiOk = Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+            if (args[0] == "--test") Console.WriteLine($"dpi mode set: {dpiOk}, now {Application.HighDpiMode}");
             AttachConsole(-1);
             Log.ToConsole = true;
             Console.WriteLine();
@@ -65,10 +68,14 @@ internal static class Program
         }
 
         Log.Write($"CuePlayer {typeof(Program).Assembly.GetName().Version} start");
+        Log.Step("process up to here");
         Core.Initialize();
+        Log.Step("libVLC loaded");
         ApplicationConfiguration.Initialize();
         var store = new ShowStore();
+        Log.Step("show file read");
         using var engine = new PlayerEngine(store);
+        Log.Step("engine created");
         Application.Run(new MainForm(engine, store));
         Log.Write("exit");
         return 0;
@@ -90,6 +97,10 @@ internal static class Program
             var sdi = Environment.GetEnvironmentVariable("CUEPLAYER_TEST_SDI");
             sh.Settings.Sdi = !string.IsNullOrEmpty(sdi);
             sh.Settings.SdiPort = sdi is null or "1" ? "" : sdi;
+            // CUEPLAYER_TEST_HDMI=1 (or \\.\DISPLAYn): full-screen output on the second monitor
+            var hdmiEnv = Environment.GetEnvironmentVariable("CUEPLAYER_TEST_HDMI");
+            sh.Settings.Hdmi = !string.IsNullOrEmpty(hdmiEnv);
+            sh.Settings.HdmiScreen = hdmiEnv is null or "1" ? "" : hdmiEnv;
             // CUEPLAYER_TEST_MONITOR=1: listen on the Windows default playback device
             sh.Settings.MonitorDevice = Environment.GetEnvironmentVariable("CUEPLAYER_TEST_MONITOR") == "1" ? AudioMonitor.Devices().FirstOrDefault().id ?? "" : "";
             sh.Cues.Add(new Cue { Path = args[1], Name = Path.GetFileName(args[1]), EndAction = args.Length > 4 ? EndAction.Normalize(args[4]) : EndAction.Hold });
@@ -158,6 +169,20 @@ internal static class Program
             var j = System.Text.Json.JsonSerializer.Serialize(engine.Snapshot());
             var d = System.Text.Json.JsonDocument.Parse(j).RootElement;
             if (i == 2) SavePreview(engine, Path.Combine(Path.GetTempPath(), "cueplayer_test_preview.png"));
+            // HDMI test: what the second monitor shows after 4 s
+            if (i == 3 && Environment.GetEnvironmentVariable("CUEPLAYER_TEST_HDMI") is { Length: > 0 })
+            {
+                var scr = HdmiOutput.Screens(Screen.PrimaryScreen?.DeviceName).FirstOrDefault();
+                if (scr != null)
+                {
+                    using var shot = new Bitmap(scr.Bounds.Width, scr.Bounds.Height);
+                    using (var g = Graphics.FromImage(shot)) g.CopyFromScreen(scr.Bounds.Location, Point.Empty, scr.Bounds.Size);
+                    var f = Path.Combine(Path.GetTempPath(), "cueplayer_hdmi.png");
+                    shot.Save(f);
+                    Console.WriteLine($"hdmi screen {scr.Name} saved: {f}");
+                    Console.WriteLine("hdmi drawn: " + engine.HdmiCheck());
+                }
+            }
             // CUEPLAYER_TEST_SETEND=N:action changes the end action of the first cue after N seconds (like the dropdown while it plays)
             var setEnd = Environment.GetEnvironmentVariable("CUEPLAYER_TEST_SETEND")?.Split(':');
             if (setEnd is { Length: 2 } && int.TryParse(setEnd[0], out var se) && i + 1 == se)
@@ -191,7 +216,7 @@ internal static class Program
             var cueIds = store.Read(sh => sh.Cues.Select(q => q.Id).ToList());
             if (Environment.GetEnvironmentVariable("CUEPLAYER_TEST_METER") == "1")
                 Console.WriteLine("     ffmpeg sound: " + engine.AudioStats() + " | meter dBFS per file channel: " + string.Join(" ", d.GetProperty("meter").EnumerateArray().Select((v, k) => $"{k + 1}:{(v.GetDouble() > 0 ? 20 * Math.Log10(v.GetDouble()) : -99):0}")));
-            Console.WriteLine($"{i + 1,3}s cued={(cuedNow == null ? "-" : (cueIds.IndexOf(cuedNow) + 1).ToString())} cuedSig={engine.CuedSignature():X6} state={d.GetProperty("state")} pos={d.GetProperty("positionMs")} len={d.GetProperty("lengthMs")} sent={d.GetProperty("fps")} decoded={d.GetProperty("decodedFps")} skipped={d.GetProperty("skipped")} omt={d.GetProperty("omt")} ndi={d.GetProperty("ndi")} sdi={d.GetProperty("sdi")} monitor={d.GetProperty("monitor").GetProperty("status")}");
+            Console.WriteLine($"{i + 1,3}s cued={(cuedNow == null ? "-" : (cueIds.IndexOf(cuedNow) + 1).ToString())} cuedSig={engine.CuedSignature():X6} state={d.GetProperty("state")} pos={d.GetProperty("positionMs")} len={d.GetProperty("lengthMs")} sent={d.GetProperty("fps")} decoded={d.GetProperty("decodedFps")} skipped={d.GetProperty("skipped")} omt={d.GetProperty("omt")} ndi={d.GetProperty("ndi")} sdi={d.GetProperty("sdi")} hdmi={d.GetProperty("hdmi")} monitor={d.GetProperty("monitor").GetProperty("status")}");
         }
         return 0;
     }

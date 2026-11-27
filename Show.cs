@@ -360,6 +360,8 @@ internal sealed class ShowSettings
     public bool Sdi { get; set; }
     public string SdiPort { get; set; } = "";   // display name of the DeckLink device (empty = the first one)
     public string MonitorDevice { get; set; } = "";   // Windows audio device id for listening (empty = off)
+    public bool Hdmi { get; set; }                     // full-screen output on a second monitor
+    public string HdmiScreen { get; set; } = "";       // Windows display name (\\.\DISPLAY2); empty = the first one that is not the control screen
     public double GainDb { get; set; }
 }
 
@@ -448,6 +450,15 @@ internal static class Log
     private static readonly object Sync = new();
     private static readonly string File = System.IO.Path.Combine(ShowStore.Folder, "cueplayer.log");
     public static bool ToConsole { get; set; }
+    private static readonly System.Diagnostics.Stopwatch Since = System.Diagnostics.Stopwatch.StartNew();
+    private static long _lastStep;
+
+    /// <summary>Start-up timing: "startup +N ms (+delta): what" - where the start of the program spends its time.</summary>
+    public static void Step(string what)
+    {
+        long now = Since.ElapsedMilliseconds, d = now - Interlocked.Exchange(ref _lastStep, now);
+        Write($"startup +{now} ms (+{d}): {what}");
+    }
 
     public static void Write(string line)
     {
