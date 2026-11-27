@@ -52,7 +52,6 @@ internal sealed class PlayerEngine : IDisposable
     private int _snapRequest;               // Stop asks the output thread to freeze the picture on air into _cuedFrame
     private readonly ManualResetEventSlim _snapDone = new(false);
     private float _gain = 1f;
-    private volatile int _outChannels = 2;   // audio channels sent right now (2, or up to 8 for a cue on "1-8")
     private volatile string? _lastDecodeError;
 
     private readonly Deck _checker;
@@ -144,6 +143,8 @@ internal sealed class PlayerEngine : IDisposable
         _vlc.Log += (_, e) =>
         {
             if (e.Level != LogLevel.Error) return;
+            // known and harmless (picture checked correct), but 63 % of all log lines (review 2026-11-27): not written
+            if (e.Message is { } msg && HarmlessVlcErrors.Any(h => msg.StartsWith(h, StringComparison.Ordinal))) return;
             Log.Write($"vlc {e.Module}: {e.Message}");
             // e.g. 'VLC could not decode the format "VMX1"' (vMix/OMT codec): shown when a cue gives no picture
             if (e.Message?.Contains("could not decode the format", StringComparison.OrdinalIgnoreCase) == true) _lastDecodeError = e.Message;
@@ -171,9 +172,13 @@ internal sealed class PlayerEngine : IDisposable
         // watches the deck on air for the preroll / fade moments of "Cut next" and "Fade next"
         _autoTimer = new System.Threading.Timer(_ =>
         {
-            if (Interlocked.Exchange(ref _autoQueued, 1) == 0) _commands.Add(() => { Interlocked.Exchange(ref _autoQueued, 0); CheckAuto(); });
+            // Post, not Add: at exit the queue is closed while this timer may still fire (Add then threw on a pool thread = crash)
+            if (Interlocked.Exchange(ref _autoQueued, 1) == 0) Post(() => { Interlocked.Exchange(ref _autoQueued, 0); CheckAuto(); });
         }, null, 500, 40);
     }
+
+    // "set on top": the video output has no window (callbacks); "video converter": at every cue start, the picture is right anyway
+    private static readonly string[] HarmlessVlcErrors = ["Failed to set on top", "Failed to create video converter"];
 
     private static unsafe void LoadVlcClock()
     {
@@ -244,6 +249,15 @@ internal sealed class PlayerEngine : IDisposable
         Log.Write($"{why} -> cued {FindCue(next)?.Name}");
     }
     public void TogglePause() => _commands.Add(TogglePauseNow);
+    /// <summary>Remote API: pause / resume without toggling (a repeated "pause" from a button box must not resume).</summary>
+    public void SetPaused(bool pause) => _commands.Add(() =>
+    {
+        Deck a; Deck? inc;
+        lock (_switchSync) { a = _active; inc = _incoming; }
+        bool playing = a.Mode == DeckMode.Playing || inc?.Mode == DeckMode.Playing;
+        bool paused = !playing && (a.Mode == DeckMode.Paused || inc?.Mode == DeckMode.Paused);
+        if (pause ? playing : paused) TogglePauseNow();
+    });
     public void Next() => _commands.Add(() => { var id = Neighbour(CurrentId() ?? _selectedId, +1); if (id != null) PlayNow(id, false); });
     public void Prev() => _commands.Add(() => { var id = Neighbour(CurrentId() ?? _selectedId, -1); if (id != null) PlayNow(id, false); });
     public void Seek(long ms) => _commands.Add(() => { var a = Active(); if (a.Mode is DeckMode.Playing or DeckMode.Paused) a.SeekTo(ms); });
@@ -274,7 +288,23 @@ internal sealed class PlayerEngine : IDisposable
     public void ApplySettings() => _commands.Add(() => { StopNow(); RebuildOutputs(); });
 
     /// <summary>Opens the listening device from the settings (or closes it); the outputs keep running.</summary>
-    public void ApplyMonitor() => _commands.Add(() => ApplyMonitorNow(force: true));
+    public void ApplyMonitor() => ApplyMonitorInBackground(force: true);
+
+    private readonly object _monitorSync = new();
+
+    /// <summary>
+    /// Lists the Windows playback devices and opens / closes the listening device on a pool thread. Listing takes 0.6-1.3 s
+    /// (MMDevice enumeration, measured); on the command thread GO and Stop waited that long (review 2026-11-27). One at a time.
+    /// </summary>
+    private void ApplyMonitorInBackground(bool force) => Task.Run(() =>
+    {
+        if (_disposed) return;
+        lock (_monitorSync)
+        {
+            try { ApplyMonitorNow(force); }
+            catch (Exception e) { _monitorStatus = "failed: " + e.Message; Log.Write("monitor failed: " + e); }
+        }
+    });
 
     private void ApplyMonitorNow(bool force)
     {
@@ -284,7 +314,7 @@ internal sealed class PlayerEngine : IDisposable
         var old = _monitor; _monitor = null; old?.Dispose();
         _monitorId = id;
         _monitorStatus = "off";
-        if (id == "") return;
+        if (id == "" || _disposed) return;
         if (!_monitorDevices.Any(d => d.id == id)) { _monitorStatus = "device not found"; return; }
         try { _monitor = new AudioMonitor(id); _monitorStatus = "on"; Log.Write("monitor on " + _monitor.DeviceName); }
         catch (Exception e) { _monitorStatus = "failed: " + e.Message; Log.Write("monitor failed: " + e); }
@@ -317,7 +347,13 @@ internal sealed class PlayerEngine : IDisposable
     {
         var cue = FindCue(id);
         if (cue == null) return;
-        if (!File.Exists(cue.Path)) { _message = "File not found: " + cue.Path; return; }
+        if (!File.Exists(cue.Path))
+        {
+            _message = "File not found: " + cue.Path;
+            _store.Change(s => { var c = s.Cues.FirstOrDefault(x => x.Id == id); if (c != null) c.Missing = true; });   // tag in the list
+            return;
+        }
+        if (cue.Missing) _store.Change(s => { var c = s.Cues.FirstOrDefault(x => x.Id == id); if (c != null) c.Missing = false; });   // back again
 
         // a transition still running is finished at once, so "the other deck" is free
         Deck? finishedOld = null;
@@ -371,7 +407,6 @@ internal sealed class PlayerEngine : IDisposable
         if (serial != deck.Serial || deck.Mode != DeckMode.Preroll) return;
         deck.Mp.SetPause(true);
         deck.SeekTo(0);   // a few pictures went by before the pause took effect: back to the very first one
-        deck.MarkPrerolled();
         deck.Mode = DeckMode.Prerolled;   // after the jump, so the output thread never sees "prerolled" with the pre-jump picture as current
         Log.Write($"prerolled {FindCue(deck.CueId)?.Name} on {deck.Name}");
     }
@@ -412,6 +447,13 @@ internal sealed class PlayerEngine : IDisposable
             inc.AudioOnly = true;
             var name = FindCue(inc.CueId)?.Name;
             _message = $"No picture from {name}: {_lastDecodeError ?? "video could not be decoded"} - sound only";
+            Log.Write(_message);
+        }
+        // the FFmpeg sound of the cue on air could not be read: say so once per load (it plays silent - before only in the log)
+        if (!black && a.AudioError is { } audioErr && _audioErrorShown != a.Serial)
+        {
+            _audioErrorShown = a.Serial;
+            _message = $"No sound from {FindCue(a.CueId)?.Name}: {audioErr}";
             Log.Write(_message);
         }
         if (black && inc == null) { PrerollChosen(a); return; }
@@ -458,6 +500,7 @@ internal sealed class PlayerEngine : IDisposable
     }
 
     private string? _prerollFailedPath;
+    private int _audioErrorShown = -1;
 
     /// <summary>
     /// Stopped (output black): the chosen cue is loaded on the deck that is not on air and paused at its first picture.
@@ -543,11 +586,15 @@ internal sealed class PlayerEngine : IDisposable
     {
         // stop the old output thread and senders
         _sendStop?.Cancel();
-        _sendThread?.Join(2000);
-        _ndi?.Dispose(); _ndi = null;
-        _omt?.Dispose(); _omt = null;
-        _sdi?.Dispose(); _sdi = null;
-        _hdmi?.Dispose(); _hdmi = null;
+        // an output thread that does not stop (stuck in a driver call) may still use the senders and buffers: then they are left
+        // alone (a leak, logged) instead of freed under it - freeing them crashed the program (review 2026-11-27)
+        bool stopped = _sendThread == null || _sendThread.Join(5000);
+        if (stopped)
+        {
+            _ndi?.Dispose(); _omt?.Dispose(); _sdi?.Dispose(); _hdmi?.Dispose();
+        }
+        else Log.Write("output thread did not stop within 5 s - its senders and buffers are not freed");
+        _ndi = null; _omt = null; _sdi = null; _hdmi = null;
         StopNow();
 
         var settings = _store.Read(s => s.Settings);
@@ -558,7 +605,7 @@ internal sealed class PlayerEngine : IDisposable
         for (int w = 0; w < 100 && _previewBusy; w++) Thread.Sleep(5);
         _previewBusy = true;
         int size = fmt.Width * fmt.Height * 2;
-        foreach (var p in new[] { _black, _mix, _previewSrc, _cuedFrame }) if (p != IntPtr.Zero) Marshal.FreeHGlobal(p);
+        if (stopped) foreach (var p in new[] { _black, _mix, _previewSrc, _cuedFrame }) if (p != IntPtr.Zero) Marshal.FreeHGlobal(p);
         _black = Marshal.AllocHGlobal(size); FillBlack(_black, size);
         _mix = Marshal.AllocHGlobal(size);
         _previewSrc = Marshal.AllocHGlobal(size);
@@ -628,9 +675,8 @@ internal sealed class PlayerEngine : IDisposable
         _sendThread.Start();
         Log.Step("outputs: running");
 
-        // after the output loop started: listing the Windows audio devices takes 0.6-1.3 s (measured), the outputs need not wait for it
-        ApplyMonitorNow(force: false);   // stays open across output changes; opened here at start
-        Log.Step($"outputs: audio monitor {_monitorStatus}");
+        // listing the Windows audio devices takes 0.6-1.3 s (measured): in the background, the commands need not wait for it
+        ApplyMonitorInBackground(force: false);   // stays open across output changes; opened here at start
     }
 
     private static unsafe void FillBlack(IntPtr p, int size)
@@ -654,8 +700,11 @@ internal sealed class PlayerEngine : IDisposable
             long tick = 0, tickBase = 0, lastPreviewKey = long.MinValue;
             double fadeElapsed = 0, secondStart = 0;
             var planar = new float[MaxChannels * 4096];
+            long lastErrorLog = -1;
             while (!ct.IsCancellationRequested)
             {
+              try
+              {
                 double due = tick * frame;   // stream time of this frame (time stamps, sound sample positions)
                 if (sdi != null)
                 {
@@ -666,7 +715,7 @@ internal sealed class PlayerEngine : IDisposable
                         Log.Write("SDI output stopped taking frames, continuing on the PC clock");
                         _sdiStatus = "stopped (device gone?)";
                         sdi = null;
-                        tickBase = tick; sw.Restart();
+                        tickBase = tick; sw.Restart(); secondStart = 0; Interlocked.Exchange(ref _sentThisSecond, 0);   // the fps count runs on the restarted clock
                         continue;
                     }
                 }
@@ -755,10 +804,12 @@ internal sealed class PlayerEngine : IDisposable
                 long ts = (long)(due * 10_000_000);
                 try
                 {
-                    sdi?.SendVideo(pic);
-                    hdmi?.Send(pic);
-                    omt?.SendVideo(pic, fmt, ts);
-                    ndi?.SendVideo(pic, fmt);
+                    // each output on its own: one that fails is dropped, the others go on (before 0.1.0.42 any exception ended the
+                    // whole loop - e.g. a DeckLink call failing when the SDI device is unplugged stopped NDI/OMT/HDMI too)
+                    if (sdi != null && !Guard(() => sdi.SendVideo(pic), "SDI", s => _sdiStatus = s)) { sdi = null; tickBase = tick; sw.Restart(); secondStart = 0; Interlocked.Exchange(ref _sentThisSecond, 0); }
+                    if (hdmi != null && !Guard(() => hdmi.Send(pic), "HDMI", s => _hdmiStatus = s)) hdmi = null;
+                    if (omt != null && !Guard(() => omt.SendVideo(pic, fmt, ts), "OMT", s => _omtStatus = s)) omt = null;
+                    if (ndi != null && !Guard(() => ndi.SendVideo(pic, fmt), "NDI", s => _ndiStatus = s)) ndi = null;
                     // a new picture also goes to the preview, unless it is still busy with the last one
                     if (key != lastPreviewKey && !_previewBusy)
                     {
@@ -778,21 +829,16 @@ internal sealed class PlayerEngine : IDisposable
                 long s0 = (long)Math.Round(tick * frame * SampleRate);
                 long s1 = (long)Math.Round((tick + 1) * frame * SampleRate);
                 int n = (int)Math.Min(s1 - s0, 4096);
-                // stereo, unless the cue on air (or the one fading in) sends all its channels ("1-8")
-                int outCh = 2;
-                if (!black) outCh = Math.Max(outCh, a.OutputChannelsNeeded);
-                if (alpha >= 0 && inc != null) outCh = Math.Max(outCh, inc.OutputChannelsNeeded);
-                outCh = Math.Min(outCh, MaxChannels);
+                const int outCh = 2;   // the outputs are always stereo (Peter 2026-11-26: "1-8" = one channel on both sides)
                 Array.Clear(planar, 0, outCh * n);
                 long now = VlcNow();
                 float gain = _gain;
                 if (!black) a.MixAudio(planar, n, outCh, now, frameUs, alpha >= 0 ? gain * (1 - alpha) : gain);
                 if (alpha >= 0 && inc != null) inc.MixAudio(planar, n, outCh, now, frameUs, gain * alpha);
-                sdi?.SendAudio(planar, outCh, n);
-                _monitor?.Write(planar, outCh, n);
-                omt?.SendAudio(planar, outCh, n, SampleRate, ts);
-                ndi?.SendAudio(planar, outCh, n, SampleRate);
-                _outChannels = outCh;
+                if (sdi != null && !Guard(() => sdi.SendAudio(planar, outCh, n), "SDI", s => _sdiStatus = s)) { sdi = null; tickBase = tick; sw.Restart(); secondStart = 0; Interlocked.Exchange(ref _sentThisSecond, 0); }
+                if (_monitor is { } mon && !Guard(() => mon.Write(planar, outCh, n), "Monitor", s => _monitorStatus = s)) { if (_monitor == mon) _monitor = null; }
+                if (omt != null && !Guard(() => omt.SendAudio(planar, outCh, n, SampleRate, ts), "OMT", s => _omtStatus = s)) omt = null;
+                if (ndi != null && !Guard(() => ndi.SendAudio(planar, outCh, n, SampleRate), "NDI", s => _ndiStatus = s)) ndi = null;
 
                 tick++;
                 Interlocked.Increment(ref _sentThisSecond);
@@ -805,6 +851,15 @@ internal sealed class PlayerEngine : IDisposable
                     Other(act).TakeDecodedCount();
                     secondStart = t;
                 }
+              }
+              catch (Exception e)
+              {
+                // a fault in one frame (mixing, a deck) must not end the output: log it at most once a second, skip the frame, go on
+                long nowMs = sw.ElapsedMilliseconds;
+                if (lastErrorLog < 0 || nowMs - lastErrorLog > 1000) { Log.Write("output frame failed: " + e); lastErrorLog = nowMs; }
+                _message = "Output error: " + e.Message;
+                tick++;
+              }
             }
         }
         catch (Exception e)
@@ -813,6 +868,30 @@ internal sealed class PlayerEngine : IDisposable
             _message = "Output failed: " + e.Message;
         }
         finally { timeEndPeriod(1); }
+    }
+
+    private static readonly string? FailOutTest = Environment.GetEnvironmentVariable("CUEPLAYER_TEST_FAILOUT");
+    private static readonly long FailOutStart = Environment.TickCount64;
+
+    /// <summary>
+    /// Output thread: runs one output's call. An exception drops that output (status shows why, logged once) - the other outputs
+    /// and the clock keep running. False = this output failed and must not be used again until the outputs are rebuilt.
+    /// </summary>
+    private static bool Guard(Action send, string name, Action<string> setStatus)
+    {
+        try
+        {
+            // test: CUEPLAYER_TEST_FAILOUT=NDI|OMT|SDI|HDMI|Monitor makes that output throw 3 s after the start
+            if (FailOutTest == name && Environment.TickCount64 - FailOutStart > 3000) throw new InvalidOperationException("test failure");
+            send();
+            return true;
+        }
+        catch (Exception e)
+        {
+            Log.Write($"{name} output failed, dropped until Apply: {e}");
+            setStatus("failed: " + e.Message);
+            return false;
+        }
     }
 
     /// <summary>Output thread: the incoming deck goes on air; the old one is stopped on the command thread.</summary>
@@ -914,9 +993,12 @@ internal sealed class PlayerEngine : IDisposable
 
     // ================= state for the page =================
 
-    public object Snapshot()
+    /// <summary>What is on air, chosen and cued, and where (no side effects: the level meter peaks are NOT taken). Page and remote API.</summary>
+    public sealed record PlayState(string State, string? CurrentId, string? SelectedId, string? IncomingId, bool Fading, string? PrerolledId,
+                                   string? CuedId, long PositionMs, long LengthMs, string Jump);
+
+    public PlayState ReadPlayState(List<Cue> cues)
     {
-        var (cues, settings, listPath, modified, fadeMs) = _store.Read(s => (s.Cues.ToList(), s.Settings, s.PlaylistPath, s.Modified, Fade.Normalize(s.FadeMs)));
         Deck a; Deck? inc; bool black, fade;
         lock (_switchSync) { a = _active; inc = _incoming; black = _showBlack; fade = _incomingFade; }
 
@@ -937,32 +1019,48 @@ internal sealed class PlayerEngine : IDisposable
         var cur = cues.FirstOrDefault(c => c.Id == currentId);
         if (len == 0 && cur != null) len = cur.DurationMs;
         var other = Other(a);
+        return new PlayState(state, currentId, _selectedId, inc?.CueId,
+            Fading: inc != null && fade && inc.HasPicture,
+            PrerolledId: inc == null && other.Mode == DeckMode.Prerolled ? other.CueId : null,
+            CuedId: black && (_cued || inc != null) && _cuedCueId != FrozenId ? _cuedCueId : null,   // stopped: this cue's first picture is on the outputs
+            PositionMs: pos, LengthMs: len,
+            Jump: $"{a.Name}:{a.Jumps}");   // changes on every new cue and every seek
+    }
+
+    /// <param name="withList">false = without the cue list and its audio choices (the page keeps the last ones): the window sends
+    /// them only when the show changed - with a long list they were most of the 10 messages a second (review 2026-11-27)</param>
+    public object Snapshot(bool withList = true)
+    {
+        var (cues, settings, listPath, modified, fadeMs) = _store.Read(s => (s.Cues.ToList(), s.Settings, s.PlaylistPath, s.Modified, Fade.Normalize(s.FadeMs)));
+        var p = ReadPlayState(cues);
+        bool black; Deck a;
+        lock (_switchSync) { a = _active; black = _showBlack; }
         return new
         {
             type = "state",
-            state,
-            currentId,
-            selectedId = _selectedId,
-            incomingId = inc?.CueId,
-            fading = inc != null && fade && inc.HasPicture,
-            prerolledId = inc == null && other.Mode == DeckMode.Prerolled ? other.CueId : null,
-            positionMs = pos,
-            jump = $"{a.Name}:{a.Jumps}",   // changes on every new cue and every seek
-            cuedId = black && (_cued || inc != null) && _cuedCueId != FrozenId ? _cuedCueId : null,   // stopped: this cue's first picture is on the outputs
-            lengthMs = len,
+            state = p.State,
+            currentId = p.CurrentId,
+            selectedId = p.SelectedId,
+            incomingId = p.IncomingId,
+            fading = p.Fading,
+            prerolledId = p.PrerolledId,
+            positionMs = p.PositionMs,
+            jump = p.Jump,
+            cuedId = p.CuedId,
+            lengthMs = p.LengthMs,
             message = _message,
             fps = _sentFps,
             decodedFps = _decodedFps,
             skipped = _skipped,
             format = _fmt.Id,
-            audioChannels = _outChannels,
+            audioChannels = 2,
             // sample peaks of the file on air, per channel in file order (0..1), since the last state message: the level meters
             meter = black ? Array.Empty<float>() : a.TakePeaks(),
             ndi = new { status = _ndiStatus, connections = SafeConnections(() => _ndi?.Connections ?? 0) },
             omt = new { status = _omtStatus, address = _omt?.Address ?? "", connections = SafeConnections(() => _omt?.Connections ?? 0) },
             hdmi = new
             {
-                status = _hdmi != null ? _hdmi.Status : _hdmiStatus,
+                status = _hdmi != null && !_hdmiStatus.StartsWith("failed") ? _hdmi.Status : _hdmiStatus,
                 name = _hdmi?.Name ?? "",
                 screens = _hdmiScreens.Select(s => new { id = s.Id, name = s.Name }),
                 repeated = _hdmi?.Repeated ?? 0,
@@ -971,9 +1069,10 @@ internal sealed class PlayerEngine : IDisposable
             monitor = new { status = _monitorStatus, devices = _monitorDevices.Select(d => new { d.id, d.name }) },
             sdi = new { status = _sdiStatus, port = _sdi?.PortName ?? "", ports = _sdiPorts, late = _sdi?.Late ?? 0, dropped = _sdi?.Dropped ?? 0 },
             settings,
-            cues,
+            remote = RemoteStatus,
+            cues = withList ? cues : null,
             // what each file offers for the audio dropdown (the rules live in AudioChoice only)
-            audioOptions = cues.ToDictionary(c => c.Id, c => AudioChoice.Options(c).Select(o => new { value = o.value, label = o.label })),
+            audioOptions = !withList ? null : cues.ToDictionary(c => c.Id, c => AudioChoice.Options(c).Select(o => new { value = o.value, label = o.label })),
             playlist = new { name = MainForm.PlaylistName(listPath), path = listPath ?? "", modified, fadeMs },
             formats = OutputFormat.All.Select(f => f.Id),
             version = typeof(PlayerEngine).Assembly.GetName().Version?.ToString() ?? "",
@@ -981,6 +1080,26 @@ internal sealed class PlayerEngine : IDisposable
     }
 
     private static int SafeConnections(Func<int> f) { try { return f(); } catch { return 0; } }
+
+    /// <summary>Status of the remote HTTP control (set by RemoteHttp), shown with the output status in the settings.</summary>
+    public volatile string RemoteStatus = RemoteHttp.Off;
+
+    /// <summary>Remote API: output format, status of each output and the last message (no side effects).</summary>
+    public object OutputStatus() => new
+    {
+        format = _fmt.Id,
+        ndi = _ndiStatus,
+        omt = _omtStatus,
+        sdi = _sdiStatus,
+        hdmi = _hdmi != null && !_hdmiStatus.StartsWith("failed") ? _hdmi.Status : _hdmiStatus,
+        receivers = new
+        {
+            // one receiver opens two connections (picture, sound) - same rule as the header
+            ndi = (SafeConnections(() => _ndi?.Connections ?? 0) + 1) / 2,
+            omt = (SafeConnections(() => _omt?.Connections ?? 0) + 1) / 2,
+        },
+        message = _message,
+    };
 
     /// <summary>Test helper: a signature of the picture the outputs show while stopped (luma samples of the cued picture).</summary>
     public unsafe long CuedSignature()
@@ -993,7 +1112,6 @@ internal sealed class PlayerEngine : IDisposable
         return sig & 0xFFFFFF;
     }
 
-    /// <summary>Position of the cue on air the way the window gets it (test helper for the countdown measurement).</summary>
     /// <summary>Test helper: the HDMI render thread reads back the centre pixel of what it drew.</summary>
     public string HdmiCheck()
     {
@@ -1006,15 +1124,6 @@ internal sealed class PlayerEngine : IDisposable
 
     /// <summary>Test helper: FFmpeg sound diagnostics of the deck on air.</summary>
     public string AudioStats() => Active().FfmpegAudioStats;
-
-    public (bool playing, long pos, long len) PositionInfo()
-    {
-        Deck a; bool black;
-        lock (_switchSync) { a = _active; black = _showBlack; }
-        if (black || a.Mode is not (DeckMode.Playing or DeckMode.Paused)) return (false, 0, 0);
-        long len = a.LengthMs;
-        return (a.Mode == DeckMode.Playing, Math.Min(a.SmoothTimeMs, len > 0 ? len : long.MaxValue), len);
-    }
 
     /// <summary>Reads the length of a file (for the cue list), without playing it.</summary>
     public async Task<long> ProbeDurationAsync(string path)
@@ -1030,9 +1139,14 @@ internal sealed class PlayerEngine : IDisposable
     /// <summary>Length, channels of each audio track and whether there is video (for the cue list and the audio choices).</summary>
     public async Task<(long durationMs, List<int> audioTracks, bool hasVideo, bool rates48)> ProbeInfoAsync(string path)
     {
+        // still pictures: picture yes, sound no, length = display time (set by the caller); libVLC cannot even read TIFF
+        if (Still.Is(path)) return (0, [], true, true);
         using var m = new Media(_vlc, path, FromType.FromPath);
-        await m.Parse(MediaParseOptions.ParseLocal, 5000);
+        var status = await m.Parse(MediaParseOptions.ParseLocal, 10000);
         await Task.Yield();   // see ProbeDurationAsync
+        // timeout / failure: no tracks are known - must NOT be taken as "no video, no audio" (the cue then counted as audio-only for
+        // ever: no preroll, no thumbnail, cut via black; review 2026-11-27). The caller leaves the cue unprobed and tries again.
+        if (status != MediaParsedStatus.Done) throw new IOException($"libVLC could not read the file ({status})");
         var tracks = m.Tracks;
         var audioTracks = tracks.Where(t => t.TrackType == TrackType.Audio).ToList();
         var audio = audioTracks.Select(t => (int)Math.Max(1, t.Data.Audio.Channels)).ToList();
@@ -1061,7 +1175,9 @@ internal sealed class PlayerEngine : IDisposable
         _sendStop?.Cancel();
         _sendThread?.Join(2000);
         // the DeckLink device was opened on the command thread (MTA); COM refuses it from the window thread (STA): free it there
-        try { _commands.Add(() => { _sdi?.Dispose(); _sdi = null; _hdmi?.Dispose(); _hdmi = null; var m = _monitor; _monitor = null; m?.Dispose(); }); } catch (InvalidOperationException) { }
+        try { _commands.Add(() => { _sdi?.Dispose(); _sdi = null; _hdmi?.Dispose(); _hdmi = null; }); } catch (InvalidOperationException) { }
+        // the listening device: after a background open that may still run (it checks _disposed)
+        lock (_monitorSync) { var m = _monitor; _monitor = null; m?.Dispose(); }
         _commands.CompleteAdding();
         _commandThread.Join(2000);
         foreach (var d in _decks) d.Dispose();

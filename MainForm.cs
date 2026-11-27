@@ -22,6 +22,7 @@ internal sealed class MainForm : Form
 
     private readonly PlayerEngine _engine;
     private readonly ShowStore _store;
+    private readonly RemoteHttp _remote;
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(11, 37, 71) };
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 100 };
     private CoreWebView2Environment? _env;
@@ -30,11 +31,13 @@ internal sealed class MainForm : Form
     private volatile int _frameHalf;
     private int _framePending;
     private bool _ready;
+    private long _sentVersion = -1, _sentListAt;
 
     public MainForm(PlayerEngine engine, ShowStore store)
     {
         _engine = engine;
         _store = store;
+        _remote = new RemoteHttp(engine, store);
         Text = AppTitle;
         BackColor = Color.FromArgb(11, 37, 71);
         ClientSize = new Size(1280, 800);
@@ -45,7 +48,8 @@ internal sealed class MainForm : Form
         catch { try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { } }
         Controls.Add(_web);
         _timer.Tick += (_, _) => PushState();
-        Load += async (_, _) => { FitToScreen(); ProbeMissing(); await InitWebAsync(); };
+        Load += async (_, _) => { FitToScreen(); ProbeMissing(); _remote.Apply(_store.Read(s => s.Settings.Clone())); await InitWebAsync(); };
+        FormClosed += (_, _) => _remote.Dispose();
         // the HDMI output never goes onto the monitor with this window (looked up again on every Apply)
         Move += (_, _) => _engine.ControlScreen = Screen.FromControl(this).DeviceName;
         FormClosing += OnClosing;
@@ -106,7 +110,8 @@ internal sealed class MainForm : Form
         _sharedPtr = IntPtr.Zero;
     }
 
-    private bool IsPlaying() => JsonSerializer.SerializeToElement(_engine.Snapshot()).GetProperty("state").GetString() is "playing" or "paused";
+    // ReadPlayState, not Snapshot: Snapshot builds the whole page state and takes the level meter peaks away from the page
+    private bool IsPlaying() => _engine.ReadPlayState(_store.Read(s => s.Cues.ToList())).State is "playing" or "paused";
 
     private void Post(object o)
     {
@@ -118,7 +123,14 @@ internal sealed class MainForm : Form
 
     private void PushState()
     {
-        if (_ready) Post(_engine.Snapshot());
+        if (_ready)
+        {
+            // the cue list only when the show changed (and at least every 2 s, in case something changed outside the store)
+            long v = _store.Version;
+            bool withList = v != _sentVersion || Environment.TickCount64 - _sentListAt > 2000;
+            if (withList) { _sentVersion = v; _sentListAt = Environment.TickCount64; }
+            Post(_engine.Snapshot(withList));
+        }
         if (_ready) AskUnsupported();
     }
 
@@ -170,7 +182,8 @@ internal sealed class MainForm : Form
             string Str(string name) => m.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
             switch (cmd)
             {
-                case "ready": if (!_ready) Log.Step("page loaded and running"); _ready = true; SetupPreviewBuffer(); PushState(); break;
+                case "ready": if (!_ready) Log.Step("page loaded and running"); _ready = true; _sentVersion = -1;   // page (re)loaded: send the list
+ SetupPreviewBuffer(); PushState(); CheckFirewall(null, false); break;
                 case "go": _engine.Go(); break;
                 case "stop": _engine.Stop(); break;
                 case "pause": _engine.TogglePause(); break;
@@ -231,6 +244,18 @@ internal sealed class MainForm : Form
                     _store.Change(s => s.Settings.MonitorDevice = m.GetProperty("device").GetString() ?? "");
                     _engine.ApplyMonitor();
                     break;
+                case "remote":
+                    // remote HTTP control: applies at once, the outputs keep running
+                    _store.Change(s =>
+                    {
+                        s.Settings.RemoteMode = RemoteHttp.NormalizeMode(Str("mode"));
+                        s.Settings.RemotePort = RemoteHttp.NormalizePort(m.TryGetProperty("port", out var rp) && rp.TryGetInt32(out var port) ? port : 0);
+                        s.Settings.RemoteAllow = Str("allow").Trim();
+                    });
+                    _remote.Apply(_store.Read(s => s.Settings.Clone()));
+                    CheckFirewall(null, false);   // the port may have changed
+                    break;
+                case "firewall": FirewallAction(Str("action")); break;
                 case "fade": ChangeCues(s => s.FadeMs = Fade.Normalize(m.GetProperty("ms").GetInt32())); break;
                 case "newList": NewPlaylist(); break;
                 case "openList": OpenPlaylistDialog(); break;
@@ -243,6 +268,33 @@ internal sealed class MainForm : Form
             Log.Write("message failed: " + ex);
             MessageBox.Show(this, ex.Message, AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    // ================= firewall rule for the remote port =================
+
+    private bool _fwBusy;
+
+    /// <summary>Reads the firewall rules in the background and tells the page (done = result of an add/remove, shown briefly).</summary>
+    private void CheckFirewall(string? done, bool busy)
+    {
+        int port = _store.Read(s => RemoteHttp.NormalizePort(s.Settings.RemotePort));
+        _ = Task.Run(() =>
+        {
+            var st = Firewall.Check(port);
+            try { BeginInvoke(() => Post(new { type = "firewall", any = st.Any, allowed = st.Allowed, text = st.Text, busy = busy || _fwBusy, done })); }
+            catch (InvalidOperationException) { }   // window closing
+        });
+    }
+
+    private async void FirewallAction(string action)
+    {
+        if (_fwBusy || action is not ("add" or "remove")) return;
+        _fwBusy = true;
+        Post(new { type = "firewall", any = true, allowed = false, text = "waiting for the administrator question…", busy = true, done = (string?)null });
+        int port = _store.Read(s => RemoteHttp.NormalizePort(s.Settings.RemotePort));
+        string result = action == "add" ? await Firewall.AddAsync(port) : await Firewall.RemoveAsync();
+        _fwBusy = false;
+        CheckFirewall(result, false);
     }
 
     /// <summary>A change to the cue list itself: the playlist now differs from its file.</summary>
@@ -319,9 +371,13 @@ internal sealed class MainForm : Form
 
     private void ApplySettings(JsonElement m)
     {
-        var old = _store.Read(s => new ShowSettings { Format = s.Settings.Format, SourceName = s.Settings.SourceName, Ndi = s.Settings.Ndi, Omt = s.Settings.Omt, Sdi = s.Settings.Sdi, SdiPort = s.Settings.SdiPort, MonitorDevice = s.Settings.MonitorDevice, Hdmi = s.Settings.Hdmi, HdmiScreen = s.Settings.HdmiScreen, GainDb = s.Settings.GainDb });
+        var old = _store.Read(s => s.Settings.Clone());
         var n = new ShowSettings
         {
+            // set on their own ("remote" message), no Apply needed
+            RemoteMode = old.RemoteMode,
+            RemotePort = old.RemotePort,
+            RemoteAllow = old.RemoteAllow,
             Format = OutputFormat.Find(m.GetProperty("format").GetString()).Id,
             SourceName = (m.GetProperty("sourceName").GetString() ?? "").Trim() is { Length: > 0 } nm ? nm : ShowSettings.DefaultSourceName,
             Ndi = m.GetProperty("ndi").GetBoolean(),
@@ -377,6 +433,9 @@ internal sealed class MainForm : Form
         ProbeCues(cues);
     }
 
+    // at most 3 files are read at once: 100 files dropped from the NAS all at once made libVLC's reads time out (review 2026-11-27)
+    private static readonly SemaphoreSlim ProbeSlots = new(3, 3);
+
     /// <summary>Reads length, audio tracks and video of the given cues in the background (for the list and the audio choices).</summary>
     private void ProbeCues(IEnumerable<Cue> cues)
     {
@@ -386,14 +445,26 @@ internal sealed class MainForm : Form
             if (!File.Exists(cue.Path)) continue;
             _ = Task.Run(async () =>
             {
+                await ProbeSlots.WaitAsync();
                 try
                 {
-                    var (ms, tracks, video, rates48) = await _engine.ProbeInfoAsync(cue.Path);
+                    // a file that could not be read (timeout, NAS busy) is tried once more; still nothing = the cue stays unprobed
+                    // (fields null), so the next start or playlist open tries again - it is never taken as "no picture"
+                    (long ms, List<int> tracks, bool video, bool rates48) info;
+                    try { info = await _engine.ProbeInfoAsync(cue.Path); }
+                    catch (IOException e)
+                    {
+                        Log.Write($"probe: {cue.Path}: {e.Message}, trying again");
+                        await Task.Delay(2000);
+                        info = await _engine.ProbeInfoAsync(cue.Path);
+                    }
+                    var (ms, tracks, video, rates48) = info;
                     _store.Change(s =>
                     {
                         var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id);
                         if (x == null) return;
                         x.DurationMs = x.IsStill ? x.StillSeconds * 1000L : ms;   // libVLC reports 10 s (its default) for pictures
+                        x.Missing = false;   // read just now: the file is there (again)
                         x.AudioTracks = tracks;
                         x.HasVideo = video;
                         x.AudioRates48 = rates48;
@@ -420,6 +491,7 @@ internal sealed class MainForm : Form
                     else _store.Change(s => { var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id); if (x != null) { x.Unsupported = null; x.DecodeChecked = true; } });
                 }
                 catch (Exception ex) { Log.Write("probe failed: " + cue.Path + ": " + ex.Message); }
+                finally { ProbeSlots.Release(); }
             });
         }
     }
@@ -428,7 +500,9 @@ internal sealed class MainForm : Form
     private void ProbeMissing()
     {
         // also cues without a thumbnail yet (or whose thumbnail file is gone / belongs to an older version of the file)
+        // also cues marked missing whose file is back (NAS reconnected, drive plugged in): probing clears the tag
         ProbeCues(_store.Read(s => s.Cues.Where(c => c.AudioTracks == null || c.HasVideo == null || !c.DecodeChecked || c.AudioRates48 == null
+            || (c.Missing && File.Exists(c.Path))
             || (c.HasVideo == true && c.Vmx == null)
             || (c.HasVideo == true && c.Unsupported == null && File.Exists(c.Path) && (!Thumbs.Exists(c.Thumb) || c.Thumb != Thumbs.NameFor(c.Path)))).ToList()));
         Thumbs.Clean(_store.Read(s => s.Cues.Select(c => c.Thumb).ToList()));

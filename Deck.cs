@@ -25,6 +25,8 @@ internal sealed class Deck : IDisposable
     public long LoadedAt;                         // when the current cue was loaded (Environment.TickCount64)
     private volatile FfmpegAudio? _sidecar;       // the sound of a multi-track file, read by FFmpeg (null = libVLC's sound)
     public bool UsesFfmpegAudio => _sidecar != null;
+    /// <summary>Why the FFmpeg sound of this cue could not be read (null = fine or libVLC sound).</summary>
+    public string? AudioError => _sidecar?.Error;
     /// <summary>Test helper: resyncs / underruns / seeks of the FFmpeg sound so far, and how far off it was at the last resync.</summary>
     public string FfmpegAudioStats => _sidecar is { } s ? $"resync {s.Resyncs} (last {s.LastResyncOff} ms) underrun {s.Underruns} seek {s.Seeks}" : "-";
     private volatile VmxVideo? _vmx;              // the picture of a VMX file, decoded by libvmx (libVLC plays it with ":no-video")
@@ -132,8 +134,8 @@ internal sealed class Deck : IDisposable
         Mp.SetVideoCallbacks(_lockCb, _unlockCb, _displayCb);
         Mp.SetAudioFormatCallback(_setupCb, _cleanupCb);
         Mp.SetAudioCallbacks(_playCb, _pauseCb, _resumeCb, _flushCb, _drainCb);
-        Mp.EndReached += (_, _) => Ended?.Invoke(this, Serial);
-        Mp.EncounteredError += (_, _) => Failed?.Invoke(this, Serial);
+        // end / error come from each Media's own state event (see Load), carrying the Serial of THAT load: the player's EndReached read
+        // Serial when the event ran, so a late end of the previous file right after a new Load counted as the end of the new cue
         // still pictures: libVLC's clock keeps running while paused and ignores the jump back to 0 (1384 ms at GO after a
         // 0.9 s preroll wait), so their position runs on the deck's own clock only (anchored at load / seek / play / pause)
         Mp.TimeChanged += (_, e) => { if (StillMs < 0) OnTimeChanged(e.Time); };
@@ -228,6 +230,12 @@ internal sealed class Deck : IDisposable
             v.FirstPicture += TryVmxPreroll;
             _vmx = v;
         }
+        int loadSerial = Serial;
+        media.StateChanged += (_, e) =>
+        {
+            if (e.State == VLCState.Ended) Ended?.Invoke(this, loadSerial);
+            else if (e.State == VLCState.Error) Failed?.Invoke(this, loadSerial);
+        };
         Mp.Play(media);
         var old = _media;
         _media = media;
@@ -285,8 +293,6 @@ internal sealed class Deck : IDisposable
             _evAt = now;
         }
     }
-
-    public long TimeMs => Math.Max(0, Mp.Time);
 
     /// <summary>Jump inside the cue; the smooth position starts again from the new time.</summary>
     public void SeekTo(long ms)
@@ -357,12 +363,6 @@ internal sealed class Deck : IDisposable
 
     public bool HasPicture { get { var v = _vmx; if (v != null) return v.HasPicture; lock (_sync) return _latest >= 0; } }
 
-    // when the deck was paused on its first picture. libVLC keeps redrawing a paused picture (every 16-60 ms, seen in the log),
-    // so "no new picture for a while" never happens; the picture counts as settled a moment after the pause + jump back to 0.
-    private long _prerolledAt = long.MaxValue;
-    public void MarkPrerolled() => Volatile.Write(ref _prerolledAt, Environment.TickCount64);
-    public long MsSincePrerolled => Mode == DeckMode.Prerolled ? Math.Max(0, Environment.TickCount64 - Volatile.Read(ref _prerolledAt)) : 0;
-
     /// <summary>The newest picture, protected from libVLC until <see cref="Release"/>. Zero when there is none.</summary>
     public IntPtr Acquire(out long serial)
     {
@@ -408,9 +408,6 @@ internal sealed class Deck : IDisposable
             return r;
         }
     }
-
-    /// <summary>How many output channels this deck needs with its current choice: all its channels for "all", else 2.</summary>
-    public int OutputChannelsNeeded => AudioSel == AudioChoice.All ? Math.Max(2, SrcChannels) : 2;
 
     /// <summary>
     /// Adds the <paramref name="n"/> samples per channel that are due now into <paramref name="planar"/> (outCh planes of n floats),

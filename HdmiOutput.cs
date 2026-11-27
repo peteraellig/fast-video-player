@@ -75,7 +75,12 @@ internal sealed unsafe class HdmiOutput : IDisposable
         _uiThread = new Thread(WindowThread) { IsBackground = true, Name = "hdmi window" };
         _uiThread.SetApartmentState(ApartmentState.STA);
         _uiThread.Start();
-        if (!_windowReady.Wait(5000)) throw new InvalidOperationException("window did not open");
+        if (!_windowReady.Wait(5000))
+        {
+            // undo what was done: the monitor back to its own refresh rate, window thread ended, buffers freed (before: it stayed switched)
+            Dispose();
+            throw new InvalidOperationException("window did not open");
+        }
         _renderThread = new Thread(RenderLoop) { IsBackground = true, Name = "hdmi render", Priority = ThreadPriority.AboveNormal };
         _renderThread.Start();
     }

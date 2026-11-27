@@ -16,7 +16,7 @@ internal static class Program
         Still.CleanCache();
 
         // console modes for testing: --probe ADDRESS [seconds] [omt|ndi], --test FILE [seconds] [format]
-        if (args.Length > 0 && (args[0] == "--probe" || args[0] == "--test" || args[0] == "--duration" || args[0] == "--sdi-in" || args[0] == "--vmx"))
+        if (args.Length > 0 && (args[0] == "--probe" || args[0] == "--test" || args[0] == "--duration" || args[0] == "--sdi-in" || args[0] == "--vmx" || args[0] == "--firewall"))
         {
             // like the window (csproj ApplicationHighDpiMode): real pixel sizes of the monitors, also for the HDMI test
             bool dpiOk = Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
@@ -41,6 +41,14 @@ internal static class Program
                 return 0;
             }
             if (args[0] == "--vmx") return VmxProbe.Run(args);
+            if (args[0] == "--firewall")
+            {
+                // reads the firewall rules of this exe for a port (changes nothing): CuePlayer.exe --firewall [port]
+                int fwPort = args.Length > 1 && int.TryParse(args[1], out var fp) ? fp : RemoteHttp.DefaultPort;
+                var st = Firewall.Check(fwPort, args.Length > 2 ? args[2] : null);   // optional other exe: test the reading only
+                Console.WriteLine($"firewall port {fwPort}: any={st.Any} allowed={st.Allowed}: {st.Text}");
+                return 0;
+            }
             if (args[0] == "--sdi-in")
             {
                 // DeckLink calls back on its own threads: run it in the MTA (Main is STA and has no message loop here)
@@ -77,6 +85,7 @@ internal static class Program
         using var engine = new PlayerEngine(store);
         Log.Step("engine created");
         Application.Run(new MainForm(engine, store));
+        store.Flush();   // the last change may still wait for the save timer
         Log.Write("exit");
         return 0;
     }
@@ -109,6 +118,19 @@ internal static class Program
             if (args.Length > 6 && double.TryParse(args[6], System.Globalization.CultureInfo.InvariantCulture, out var fade)) sh.FadeMs = Fade.Normalize((int)(fade * 1000));
         });
         using var engine = new PlayerEngine(store);
+        // CUEPLAYER_TEST_REMOTE=port[:network[:allowed IPs]]: remote HTTP control during the test (default local only)
+        using var remote = new RemoteHttp(engine, store);
+        if (Environment.GetEnvironmentVariable("CUEPLAYER_TEST_REMOTE") is { Length: > 0 } rt)
+        {
+            var p = rt.Split(':', 3);
+            remote.Apply(new ShowSettings
+            {
+                RemotePort = int.TryParse(p[0], out var rport) ? rport : RemoteHttp.DefaultPort,
+                RemoteMode = p.Length > 1 ? p[1] : RemoteHttp.Local,
+                RemoteAllow = p.Length > 2 ? p[2] : "",
+            });
+            Console.WriteLine("remote: " + remote.Status);
+        }
         // read tracks like the window does when files are added; CUEPLAYER_TEST_AUDIO=choice sets the first cue's audio choice
         foreach (var c in store.Read(sh => sh.Cues.ToList()))
         {

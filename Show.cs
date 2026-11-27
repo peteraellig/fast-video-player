@@ -130,7 +130,7 @@ internal sealed class Cue
     /// <summary>The file is a still picture (by its extension). Sent to the page, so the row shows the time instead of the audio choice.</summary>
     public bool IsStill => Still.Is(Path);
 
-    /// <summary>Audio choice: "12", "34", "56", "78", "1", "2", "all", "t1".."t8" (track of a multi-track file) or "mute".</summary>
+    /// <summary>Audio choice: "12", "34", "56", "78", "1".."8", "t1".."t8" (track of a multi-track file) or "mute".</summary>
     public string Audio { get; set; } = AudioChoice.Default;
 
     /// <summary>Channels of each audio track of the file (read once with libVLC; null = not read yet, empty = no audio).</summary>
@@ -165,12 +165,12 @@ internal sealed class Cue
 
 /// <summary>
 /// Audio choices per cue (Peter: dropdown 12, 34, 56, 78, 1-8, mute - only what the file offers; stereo: 12, 1, 2, mute).
-/// One track with several channels: pairs, single channels for stereo, "all" = every channel to the output (NDI/OMT then carry that
-/// many channels). Several tracks (libVLC plays one at a time): "tN" = track N, labelled with its channel numbers counted across tracks.
+/// One track with several channels: pairs, and every channel alone (mono on both sides). The output is always stereo; an old saved
+/// "all" falls back to the first option. Several tracks (libVLC plays one at a time): "tN" = track N, labelled with its channel numbers counted across tracks.
 /// </summary>
 internal static class AudioChoice
 {
-    public const string Default = "12", All = "all", Mute = "mute";
+    public const string Default = "12", Mute = "mute";
 
     public static List<(string value, string label)> Options(Cue c) => Options(c.AudioTracks, c.UsesFfmpegAudio);
 
@@ -240,11 +240,9 @@ internal static class AudioChoice
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string, int), (int src, int dst)[]> FileRouteCache = new();
 
     /// <summary>Which FILE channel goes to which output channel.</summary>
-    private static (int src, int dst)[] FileRoutes(string sel, int srcChannels) => ((Func<(string, int), (int src, int dst)[]>)(k =>
+    private static (int src, int dst)[] FileRoutes(string s, int n)
     {
-        var (s, n) = k;
         if (s == Mute) return [];
-        if (s == All) return Enumerable.Range(0, n).Select(i => (i, i)).ToArray();
         if (n <= 1) return [(0, 0), (0, 1)];   // mono file: on both sides
         if (s.Length == 1 && s[0] is >= '1' and <= '8')
         {
@@ -257,7 +255,7 @@ internal static class AudioChoice
             return a + 1 < n ? [(a, 0), (a + 1, 1)] : [(0, 0), (1, 1)];
         }
         return [(0, 0), (1, 1)];   // "tN": the chosen track as it comes (stereo)
-    }))((sel, srcChannels));
+    }
 }
 
 /// <summary>A playlist file (*.cuelist, JSON). Each cue keeps its absolute path and the path relative to the playlist,
@@ -363,6 +361,14 @@ internal sealed class ShowSettings
     public bool Hdmi { get; set; }                     // full-screen output on a second monitor
     public string HdmiScreen { get; set; } = "";       // Windows display name (\\.\DISPLAY2); empty = the first one that is not the control screen
     public double GainDb { get; set; }
+
+    // Remote control over HTTP (Peter 2026-11-27): off by default - the player is a closed system unless this is switched on
+    public string RemoteMode { get; set; } = RemoteHttp.Off;   // off | local (127.0.0.1 only) | network
+    public int RemotePort { get; set; } = RemoteHttp.DefaultPort;
+    public string RemoteAllow { get; set; } = "";              // network mode: allowed client IPs, comma separated (empty = all)
+
+    /// <summary>A copy (settings are replaced as a whole on Apply).</summary>
+    public ShowSettings Clone() => (ShowSettings)MemberwiseClone();
 }
 
 internal static class Fade
@@ -422,26 +428,65 @@ internal sealed class ShowStore
         return new Show();
     }
 
-    /// <summary>Runs a change under the lock and saves.</summary>
+    /// <summary>Runs a change under the lock; the file is written shortly after in the background (see <see cref="Flush"/>).</summary>
     public T Change<T>(Func<Show, T> change)
     {
-        lock (_sync)
-        {
-            var r = change(Show);
-            Save();
-            return r;
-        }
+        T r;
+        lock (_sync) { r = change(Show); Interlocked.Increment(ref _version); }
+        RequestSave();
+        return r;
     }
+
+    private long _version;
+    /// <summary>+1 on every change: the window sends the cue list to the page only when this moved.</summary>
+    public long Version => Interlocked.Read(ref _version);
 
     public void Change(Action<Show> change) => Change(s => { change(s); return 0; });
 
     public T Read<T>(Func<Show, T> read) { lock (_sync) return read(Show); }
 
-    private void Save()
+    // ---- saving (review 2026-11-27): the file was written inside the lock on every change; the command thread reads that lock every
+    // 40 ms, so a slow disk / virus scan held up GO. Now: changes mark the show dirty, a timer writes it 200 ms later on a pool thread
+    // (several changes = one write), outside the lock. A failed write (file locked) is logged and tried again 2 s later.
+    private readonly object _saveSync = new(), _writeSync = new();
+    private bool _dirty;
+    private System.Threading.Timer? _saveTimer;
+    private const int SaveDelayMs = 200, RetryDelayMs = 2000;
+
+    private void RequestSave()
     {
-        var tmp = _file + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(Show, Json));
-        File.Move(tmp, _file, true);
+        lock (_saveSync)
+        {
+            _dirty = true;
+            _saveTimer ??= new System.Threading.Timer(_ => Flush());
+            _saveTimer.Change(SaveDelayMs, Timeout.Infinite);
+        }
+    }
+
+    /// <summary>Writes the show now if it changed (timer, and at exit). Never throws.</summary>
+    public void Flush()
+    {
+        lock (_writeSync)
+        {
+            lock (_saveSync) { if (!_dirty) return; _dirty = false; }
+            string json;
+            lock (_sync) json = JsonSerializer.Serialize(Show, Json);   // in memory only, the disk is written outside the lock
+            try
+            {
+                var tmp = _file + ".tmp";
+                File.WriteAllText(tmp, json);
+                File.Move(tmp, _file, true);
+            }
+            catch (Exception e)
+            {
+                Log.Write("show.json not saved, trying again: " + e.Message);
+                lock (_saveSync)
+                {
+                    _dirty = true;
+                    _saveTimer?.Change(RetryDelayMs, Timeout.Infinite);
+                }
+            }
+        }
     }
 }
 
@@ -452,6 +497,8 @@ internal static class Log
     public static bool ToConsole { get; set; }
     private static readonly System.Diagnostics.Stopwatch Since = System.Diagnostics.Stopwatch.StartNew();
     private static long _lastStep;
+    private const long MaxBytes = 5 * 1024 * 1024;
+    private static int _linesSinceCheck;
 
     /// <summary>Start-up timing: "startup +N ms (+delta): what" - where the start of the program spends its time.</summary>
     public static void Step(string what)
@@ -465,6 +512,12 @@ internal static class Log
         var text = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {line}";
         lock (Sync)
         {
+            // size limit: checked about every 500 lines; over 5 MB the log becomes cueplayer.log.old (one generation kept)
+            if (++_linesSinceCheck >= 500 || _linesSinceCheck == 1)
+            {
+                _linesSinceCheck = 1;
+                try { if (new FileInfo(File).Length > MaxBytes) System.IO.File.Move(File, File + ".old", true); } catch { }
+            }
             try { System.IO.File.AppendAllText(File, text + Environment.NewLine); } catch { }
             if (ToConsole) Console.WriteLine(text);
         }
