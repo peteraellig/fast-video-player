@@ -15,7 +15,7 @@ A Windows playout tool for single clips or a cue list. It sends video and audio 
 - **Countdown.** Use the **Last 10 s** button to jump to the final 10 seconds. An on-screen countdown shows the time remaining.
 - **Audio choice per clip.** Select a stereo pair (1+2, 3+4, 5+6 or 7+8), play any single channel from 1–8 in mono on both output channels, or mute the clip. Single-channel selection is useful for files with one language per track.
 - **Audio level meters.** See the level of every channel in the file.
-- **Outputs.** The SDI card sets the pace for SDI playback. NDI and OMT show receiver counts. Choose any Windows audio device for local monitoring.
+- **Outputs.** OMT / NDI/ SDI / HDMI /local audio.  
 
 ## Supported files
 
