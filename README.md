@@ -41,7 +41,7 @@ The codec list includes formats libVLC normally handles. The combinations below 
 | MXF | 16-channel test file |
 | AVI | VMX1 video with one 8-channel audio track |
 
-**Output tests** covered 1080p50 and 1080i50 over NDI, OMT and SDI. The SDI test used an UltraStudio HD Mini with an SDI loop.
+**Output tests** covered 1080p50 and 1080i50 over NDI, OMT and SDI. The SDI test used an Blackmagic SDI card.
 
 **Not yet supported or tested** are still images, 59.94 output, 2160p over SDI, and files with more than two audio channels at sample rates other than 48 kHz. In those files, channel order may be incorrect.
 
