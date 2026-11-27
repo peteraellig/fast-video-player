@@ -1,4 +1,4 @@
-# fast video player
+# fast video player 0.1.0.35
 
 A Windows playout tool for single clips or a cue list. It sends video and audio over **NDI**, **OMT** and **SDI** (Blackmagic DeckLink / UltraStudio), with local audio monitoring.
 
@@ -26,6 +26,7 @@ A Windows playout tool for single clips or a cue list. It sends video and audio 
 | Video codecs via libVLC | H.264, H.265/HEVC, MPEG-2 (including XDCAM in MXF), ProRes, DNxHD/DNxHR, MJPEG, DV, VP8/VP9, AV1, WMV/VC-1 |
 | vMix recordings | VMX1 video, decoded with libvmx |
 | Audio codecs | PCM, AAC, MP3, AC-3, FLAC, Opus |
+| Still Images | JPG, JPEG, PNG, BMP, GIF (only first image), TIFF / TIF
 
 For files with several audio tracks or more than two channels, FFmpeg reads the channels in the file's own order. This requires 48 kHz audio.
 
@@ -40,10 +41,11 @@ The codec list includes formats libVLC normally handles. The combinations below 
 | MXF | Eight mono audio tracks |
 | MXF | 16-channel test file |
 | AVI | VMX1 video with one 8-channel audio track |
+|     | all image formats
 
 **Output tests** covered 1080p50 and 1080i50 over NDI, OMT and SDI. The SDI test used an Blackmagic SDI card.
 
-**Not yet supported or tested** are still images, 59.94 output, 2160p over SDI, and files with more than two audio channels at sample rates other than 48 kHz. In those files, channel order may be incorrect.
+**Not yet supported or tested** 59.94 output, 2160p over SDI, and files with more than two audio channels at sample rates other than 48 kHz. In those files, channel order may be incorrect.
 
 ## Requirements and installation
 
