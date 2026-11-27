@@ -15,7 +15,9 @@ A Windows playout tool for single clips or a cue list. It sends video and audio 
 - **Countdown.** Use the **Last 10 s** button to jump to the final 10 seconds. An on-screen countdown shows the time remaining.
 - **Audio choice per clip.** Select a stereo pair (1+2, 3+4, 5+6 or 7+8), play any single channel from 1–8 in mono on both output channels, or mute the clip. Single-channel selection is useful for files with one language per track.
 - **Audio level meters.** See the level of every channel in the file.
-- **Outputs.** OMT / NDI / SDI / HDMI / local audio.  
+- **Outputs.** OMT / NDI / SDI / HDMI / local audio.
+- ** API Control.** HTTP control is disabled by default and can be enabled in the ‘Remote control’ tab for this PC or for the network (port 8095; optionally, only specific IP addresses; firewall rule via a button). Afterwards, Companion, vMix, Stream Deck or a browser can control the player using simple URLs such as /api/go or /api/cue/3/play and check its status with /api/state, as the player does not send any data on its own initiative.  
+Under /api and in the player’s Help window, you will find all the URLs with examples for browsers, Companion, vMix, Stream Deck and PowerShell.  
 
 ## Supported files
 
