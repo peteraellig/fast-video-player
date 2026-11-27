@@ -48,7 +48,6 @@ The codec list includes formats libVLC normally handles. The combinations below 
 ## Requirements and installation
 
 Run the installer on 64-bit Windows 10 or 11. It includes the .NET runtime. The interface requires the Microsoft Edge WebView2 Runtime.
-
 For NDI output, install the NDI runtime separately. For SDI output, install Blackmagic Desktop Video separately.
 
 ## Build from source
@@ -60,3 +59,5 @@ Run `dotnet build CuePlayer.csproj -c Release` to build the player. To create a 
 ## License
 
 CuePlayer is released under the [BSD Zero Clause License (0BSD)](LICENSE). Bundled third-party components retain their respective licenses, listed in the [third-party notices](licence/THIRD-PARTY-NOTICES.txt).
+
+by Peter Aellig and Claude Opus 5.5
