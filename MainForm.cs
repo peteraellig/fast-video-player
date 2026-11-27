@@ -14,7 +14,8 @@ namespace CuePlayer;
 internal sealed class MainForm : Form
 {
     private static readonly string[] MediaExtensions =
-        [".mp4", ".mov", ".m4v", ".mkv", ".mxf", ".avi", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".mts", ".flv", ".mp3", ".wav", ".aac", ".m4a", ".flac"];
+        [".mp4", ".mov", ".m4v", ".mkv", ".mxf", ".avi", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts", ".mts", ".flv", ".mp3", ".wav", ".aac", ".m4a", ".flac",
+         .. Still.Extensions];
     public const string AppTitle = "fast video player";
     private const string PlaylistFilter = "CuePlayer playlist (*.cuelist)|*.cuelist|All files|*.*";
     private const int PreviewBytes = PlayerEngine.PreviewWidth * PlayerEngine.PreviewHeight * 4;
@@ -61,7 +62,8 @@ internal sealed class MainForm : Form
         // 1400 wide since the level meters sit beside the preview (right column 560 instead of 460)
         // 1300: below that the header (status | text logo | fps, clock) and the list buttons get too tight (checked at 1100)
         MinimumSize = Clamp(SizeFromClientSize(new Size((int)(1300 * s), (int)(1050 * s))));
-        Size = Clamp(SizeFromClientSize(new Size((int)(1400 * s), (int)(1050 * s))));
+        // 1680: Peter widened the window to this (2026-11-27), the list has room for the thumbnails
+        Size = Clamp(SizeFromClientSize(new Size((int)(1680 * s), (int)(1050 * s))));
         Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Top + (wa.Height - Height) / 2);
     }
 
@@ -74,6 +76,9 @@ internal sealed class MainForm : Form
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
         core.SetVirtualHostNameToFolderMapping("cueplayer.app", Path.Combine(AppContext.BaseDirectory, "ui"), CoreWebView2HostResourceAccessKind.DenyCors);
+        // thumbnails of the cue list (made when files are probed), read-only images
+        Directory.CreateDirectory(Thumbs.Folder);
+        core.SetVirtualHostNameToFolderMapping("thumbs.cueplayer.app", Thumbs.Folder, CoreWebView2HostResourceAccessKind.Allow);
         core.WebMessageReceived += OnMessage;
         // the page must never leave the program's own content
         core.NavigationStarting += (_, e) => { if (!e.Uri.StartsWith("https://cueplayer.app/")) e.Cancel = true; };
@@ -183,6 +188,16 @@ internal sealed class MainForm : Form
                 case "remove": ChangeCues(s => s.Cues.RemoveAll(c => c.Id == Str("id"))); break;
                 case "endAction":
                     ChangeCues(s => { var c = s.Cues.FirstOrDefault(c => c.Id == Str("id")); if (c != null) c.EndAction = EndAction.Normalize(Str("action")); });
+                    break;
+                case "still":
+                    // display time of a still picture, applies at once (also while it is on air)
+                    ChangeCues(s =>
+                    {
+                        var c = s.Cues.FirstOrDefault(c => c.Id == Str("id"));
+                        if (c == null) return;
+                        c.StillSeconds = Still.Normalize(m.GetProperty("seconds").GetInt32());
+                        c.DurationMs = c.StillSeconds * 1000L;
+                    });
                     break;
                 case "audio":
                     // applies at once, also while the cue plays (the engine follows it within 40 ms)
@@ -367,7 +382,7 @@ internal sealed class MainForm : Form
                     {
                         var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id);
                         if (x == null) return;
-                        x.DurationMs = ms;
+                        x.DurationMs = x.IsStill ? x.StillSeconds * 1000L : ms;   // libVLC reports 10 s (its default) for pictures
                         x.AudioTracks = tracks;
                         x.HasVideo = video;
                         x.AudioRates48 = rates48;
@@ -376,17 +391,20 @@ internal sealed class MainForm : Form
                     // VMX (vMix recordings): libVLC cannot decode it, libvmx does - no test decode needed
                     bool vmx = video && VmxVideo.IsVmx(cue.Path);
                     _store.Change(s => { var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id); if (x != null) x.Vmx = vmx; });
+                    string thumb = Thumbs.NameFor(cue.Path);
                     if (vmx)
                     {
                         Log.Write($"VMX picture (libvmx): {cue.Path}");
-                        _store.Change(s => { var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id); if (x != null) { x.Unsupported = null; x.DecodeChecked = true; } });
+                        bool t = VmxVideo.Thumb(cue.Path, thumb);
+                        _store.Change(s => { var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id); if (x != null) { x.Unsupported = null; x.DecodeChecked = true; x.Thumb = t ? thumb : null; } });
                     }
-                    // can libVLC decode the picture? - a short test decode on the small check player
+                    // can libVLC decode the picture? - a short test decode on the small check player; its first picture is the thumbnail
                     else if (video)
                     {
-                        var reason = await _engine.CheckDecodableAsync(cue.Path);
+                        var reason = await _engine.CheckDecodableAsync(cue.Path, thumb);
                         if (reason != null) Log.Write($"not supported: {cue.Path}: {reason}");
-                        _store.Change(s => { var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id); if (x != null) { x.Unsupported = reason; x.DecodeChecked = true; } });
+                        bool t = reason == null && Thumbs.Exists(thumb);
+                        _store.Change(s => { var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id); if (x != null) { x.Unsupported = reason; x.DecodeChecked = true; x.Thumb = t ? thumb : null; } });
                     }
                     else _store.Change(s => { var x = s.Cues.FirstOrDefault(q => q.Id == cue.Id); if (x != null) { x.Unsupported = null; x.DecodeChecked = true; } });
                 }
@@ -396,7 +414,14 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>Cues from before the audio choices / the decode check (or from an old playlist): read them once.</summary>
-    private void ProbeMissing() => ProbeCues(_store.Read(s => s.Cues.Where(c => c.AudioTracks == null || c.HasVideo == null || !c.DecodeChecked || c.AudioRates48 == null || (c.HasVideo == true && c.Vmx == null)).ToList()));
+    private void ProbeMissing()
+    {
+        // also cues without a thumbnail yet (or whose thumbnail file is gone / belongs to an older version of the file)
+        ProbeCues(_store.Read(s => s.Cues.Where(c => c.AudioTracks == null || c.HasVideo == null || !c.DecodeChecked || c.AudioRates48 == null
+            || (c.HasVideo == true && c.Vmx == null)
+            || (c.HasVideo == true && c.Unsupported == null && File.Exists(c.Path) && (!Thumbs.Exists(c.Thumb) || c.Thumb != Thumbs.NameFor(c.Path)))).ToList()));
+        Thumbs.Clean(_store.Read(s => s.Cues.Select(c => c.Thumb).ToList()));
+    }
 
     // ================= files that cannot be played =================
 

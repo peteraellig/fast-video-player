@@ -2,7 +2,7 @@
 
 A Windows playout tool for single clips or a cue list. It sends video and audio over **NDI**, **OMT** and **SDI** (Blackmagic DeckLink / UltraStudio), with local audio monitoring.
 
-**[Download the Windows x64 installer · version 0.1.0.32](https://github.com/peteraellig/fast-video-player/releases/download/v0.1.0.32/FastVideoPlayer-Setup-0.1.0.32.exe)**
+**[Download the Windows x64 installer · version 0.1.0.35](https://github.com/peteraellig/fast-video-player/releases/download/v0.1.0.35/FastVideoPlayer-Setup-0.1.0.35.exe)**
 
 ![CuePlayer main screen with cue list and video preview](logo/Mainscreen.png)
 

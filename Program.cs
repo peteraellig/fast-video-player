@@ -13,6 +13,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         Directory.CreateDirectory(ShowStore.Folder);
+        Still.CleanCache();
 
         // console modes for testing: --probe ADDRESS [seconds] [omt|ndi], --test FILE [seconds] [format]
         if (args.Length > 0 && (args[0] == "--probe" || args[0] == "--test" || args[0] == "--duration" || args[0] == "--sdi-in" || args[0] == "--vmx"))
@@ -27,7 +28,10 @@ internal static class Program
                 for (int i = 1; i < args.Length; i++)
                 {
                     Console.WriteLine($"{args[i]}: {e.ProbeDurationAsync(args[i]).GetAwaiter().GetResult()} ms; {e.ProbeTracksAsync(args[i]).GetAwaiter().GetResult()}");
-                    Console.WriteLine($"  decode check: {e.CheckDecodableAsync(args[i]).GetAwaiter().GetResult() ?? "picture OK"}");
+                    var thumb = Thumbs.NameFor(args[i]);
+                    bool isVmx = VmxVideo.IsVmx(args[i]);
+                    var check = isVmx ? (VmxVideo.Thumb(args[i], thumb) ? null : "VMX thumbnail failed") : e.CheckDecodableAsync(args[i], thumb).GetAwaiter().GetResult();
+                    Console.WriteLine($"  decode check: {check ?? "picture OK"}{(isVmx ? " (VMX)" : "")}; thumbnail {(Thumbs.Exists(thumb) ? Path.Combine(Thumbs.Folder, thumb) : "none")}");
                 }
                 Thread.Sleep(3000);
                 Console.WriteLine("still alive");
@@ -102,7 +106,9 @@ internal static class Program
             store.Change(sh =>
             {
                 var x = sh.Cues.First(q => q.Id == c.Id);
-                x.DurationMs = ms; x.AudioTracks = tracks; x.HasVideo = video; x.AudioRates48 = rates48;
+                // CUEPLAYER_TEST_STILLSECS=N: display time of still pictures (default 10, 0 = infinite)
+                if (int.TryParse(Environment.GetEnvironmentVariable("CUEPLAYER_TEST_STILLSECS"), out var ss)) x.StillSeconds = Still.Normalize(ss);
+                x.DurationMs = x.IsStill ? x.StillSeconds * 1000L : ms; x.AudioTracks = tracks; x.HasVideo = video; x.AudioRates48 = rates48;
                 x.Vmx = video && VmxVideo.IsVmx(x.Path);
                 x.Audio = AudioChoice.Normalize(x == sh.Cues[0] && audio != null ? audio : x.Audio, x);
             });
@@ -165,6 +171,13 @@ internal static class Program
             {
                 store.Change(sh => sh.Cues[0].Audio = AudioChoice.Normalize(setAudio[1], sh.Cues[0]));
                 Console.WriteLine($"audio of the first cue -> {store.Read(sh => sh.Cues[0].Audio)}");
+            }
+            // CUEPLAYER_TEST_SETSTILL=N:secs changes the first cue's still display time after N seconds (like the dropdown while on air)
+            var setStill = Environment.GetEnvironmentVariable("CUEPLAYER_TEST_SETSTILL")?.Split(':');
+            if (setStill is { Length: 2 } && int.TryParse(setStill[0], out var sst) && int.TryParse(setStill[1], out var ssv) && i + 1 == sst)
+            {
+                store.Change(sh => { sh.Cues[0].StillSeconds = Still.Normalize(ssv); sh.Cues[0].DurationMs = sh.Cues[0].StillSeconds * 1000L; });
+                Console.WriteLine($"still time of the first cue -> {ssv} s");
             }
             // CUEPLAYER_TEST_SELECT2=N clicks the second cue after N seconds
             if (int.TryParse(Environment.GetEnvironmentVariable("CUEPLAYER_TEST_SELECT2"), out var s2) && i + 1 == s2) engine.Select(store.Read(sh => sh.Cues[1].Id));

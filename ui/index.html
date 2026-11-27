@@ -56,12 +56,19 @@
   .cues { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px 40px; position: relative; scrollbar-color: #6d9fd8 #0d2a4f; scrollbar-width: auto; }
   .cues.droptarget { outline: 2px dashed var(--accent); outline-offset: -6px; }
   .empty { color: var(--dim); text-align: center; margin-top: 80px; line-height: 1.8; }
-  .cue { position: relative; display: grid; grid-template-columns: 34px 78px 1fr 64px 86px 120px 62px 30px; align-items: center; gap: 8px;
-         padding: 8px 8px; margin: 3px 0; border-radius: 6px; background: var(--panel); border: 2px solid transparent; overflow: hidden; cursor: default; }
+  /* number | first picture | state tags | name ... (Peter: picture at the left edge, tags beside it, not on it) */
+  .cue { position: relative; display: grid; grid-template-columns: 20px 80px 78px 1fr 64px 86px 120px 62px 30px; align-items: center; gap: 8px;
+         padding: 6px 8px 6px 4px; margin: 3px 0; border-radius: 6px; background: var(--panel); border: 2px solid transparent; overflow: hidden; cursor: default; }
   .cue { border-color: rgba(140, 196, 255, .45); }
   .cue:hover { background: var(--panel2); }
   .cue .num { color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; }
   .cue .tag { font-size: 11px; font-weight: 700; letter-spacing: .5px; }
+  /* first picture of the clip (Peter), state tags in their own column beside it */
+  .cue .thumb { position: relative; width: 80px; height: 45px; border-radius: 3px; overflow: hidden; background: #071a33; }
+  .cue .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cue .thumb .noimg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 18px; }
+  .cue .tags { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .cue .tags .tag { white-space: nowrap; }
   .cue .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cue .name small { display: block; color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
   .cue .dur { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
@@ -448,6 +455,8 @@ function renderClock(s) {
 }
 
 let lastListSel = null;
+// display time of a still picture (Peter: 1-30 s or infinite; 0 = infinite)
+const STILL_OPTS = [...Array.from({ length: 30 }, (_, i) => [i + 1, `${i + 1} s`]), [0, '∞']];
 function renderList(s) {
   const key = JSON.stringify([s.cues, s.currentId, s.selectedId, s.state, s.incomingId, s.fading, s.prerolledId, s.cuedId]);
   if (key === listKey) return;
@@ -476,10 +485,13 @@ function renderList(s) {
     const opts = Object.entries(END_LABELS).map(([v, l]) => `<option value="${v}" ${c.endAction === v ? 'selected' : ''}>${l}</option>`).join('');
     return `<div class="cue ${c.id === sel ? 'selected' : ''} ${playing ? 'playing' : ''} ${c.missing ? 'missing' : ''}" data-id="${c.id}" draggable="true">
       <span class="num">${i + 1}</span>
-      <span>${tags}</span>
+      <span class="thumb">${c.thumb ? `<img src="https://thumbs.cueplayer.app/${encodeURIComponent(c.thumb)}" alt="">` : `<span class="noimg">${c.hasVideo === false ? '♪' : ''}</span>`}</span>
+      <span class="tags">${tags}</span>
       <span class="name" title="${esc(c.path)}">${esc(c.name)}<small>${esc(c.path)}</small></span>
-      <span class="dur">${c.durationMs ? fmt(c.durationMs) : '…'}</span>
-      <select data-act="audio" title="Audio: channels or track of the file (applies at once)">${aopts}</select>
+      <span class="dur">${c.isStill && c.stillSeconds === 0 ? '∞' : c.durationMs ? fmt(c.durationMs) : '…'}</span>
+      ${c.isStill
+        ? `<select data-act="still" title="Still picture: how long it is shown, then the end action (applies at once)">${STILL_OPTS.map(([v, l]) => `<option value="${v}" ${c.stillSeconds === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`
+        : `<select data-act="audio" title="Audio: channels or track of the file (applies at once)">${aopts}</select>`}
       <select data-act="end" title="At the end">${opts}</select>
       <span class="mv"><button data-act="up" title="Move up (Alt+↑)" ${i === 0 ? 'disabled' : ''}>▲</button><button data-act="down" title="Move down (Alt+↓)" ${i === s.cues.length - 1 ? 'disabled' : ''}>▼</button></span>
       <button class="del" data-act="del" title="Remove from list">×</button>
@@ -505,6 +517,7 @@ cuesBox.addEventListener('change', e => {
   const row = e.target.closest('.cue');
   if (row && e.target.dataset.act === 'end') send('endAction', { id: row.dataset.id, action: e.target.value });
   if (row && e.target.dataset.act === 'audio') send('audio', { id: row.dataset.id, value: e.target.value });
+  if (row && e.target.dataset.act === 'still') send('still', { id: row.dataset.id, seconds: +e.target.value });
 });
 
 // reorder by dragging rows; files from Explorer are added at the drop position

@@ -134,7 +134,9 @@ internal sealed class Deck : IDisposable
         Mp.SetAudioCallbacks(_playCb, _pauseCb, _resumeCb, _flushCb, _drainCb);
         Mp.EndReached += (_, _) => Ended?.Invoke(this, Serial);
         Mp.EncounteredError += (_, _) => Failed?.Invoke(this, Serial);
-        Mp.TimeChanged += (_, e) => OnTimeChanged(e.Time);
+        // still pictures: libVLC's clock keeps running while paused and ignores the jump back to 0 (1384 ms at GO after a
+        // 0.9 s preroll wait), so their position runs on the deck's own clock only (anchored at load / seek / play / pause)
+        Mp.TimeChanged += (_, e) => { if (StillMs < 0) OnTimeChanged(e.Time); };
     }
 
     /// <summary>New buffers for an output format. Only while the deck is stopped.</summary>
@@ -158,13 +160,18 @@ internal sealed class Deck : IDisposable
     /// <summary>Starts a cue. With <paramref name="preroll"/> the engine pauses it at its first picture (see PrerollPicture).</summary>
     public void Load(LibVLC vlc, Cue cue, OutputFormat fmt, bool preroll)
     {
-        var media = new Media(vlc, cue.Path, FromType.FromPath);
-        // letterbox/pillarbox into the output size instead of stretching
-        media.AddOption(":video-filter=canvas");
-        media.AddOption($":canvas-width={fmt.Width}");
-        media.AddOption($":canvas-height={fmt.Height}");
-        media.AddOption($":canvas-aspect={fmt.Width}:{fmt.Height}");
-        media.AddOption(":canvas-padd");
+        // pictures: played from a copy at exactly the output size with bars (see Still.Prepared); videos: canvas filter
+        string playPath = cue.IsStill ? Still.Prepared(cue.Path, fmt.Width, fmt.Height) ?? cue.Path : cue.Path;
+        var media = new Media(vlc, playPath, FromType.FromPath);
+        if (!cue.IsStill)
+        {
+            // letterbox/pillarbox into the output size instead of stretching
+            media.AddOption(":video-filter=canvas");
+            media.AddOption($":canvas-width={fmt.Width}");
+            media.AddOption($":canvas-height={fmt.Height}");
+            media.AddOption($":canvas-aspect={fmt.Width}:{fmt.Height}");
+            media.AddOption(":canvas-padd");
+        }
         // interlaced output: keep the fields woven; progressive output: deinterlace interlaced files (field rate when the output is >= 50)
         if (fmt.Interlaced) media.AddOption(":deinterlace=0");
         else
@@ -209,6 +216,10 @@ internal sealed class Deck : IDisposable
         Interlocked.Increment(ref Serial);
         CueId = cue.Id;
         Mode = preroll ? DeckMode.Preroll : DeckMode.Playing;
+        // still picture: libVLC shows it endlessly (its clock runs); the engine ends it after the chosen time (StillMs)
+        if (cue.IsStill) media.AddOption(":image-duration=-1");
+        StillMs = cue.IsStill ? cue.StillSeconds * 1000 : -1;
+        if (cue.IsStill) lock (_posSync) { _evTime = 0; _evAt = _posClock.ElapsedMilliseconds; }   // own clock starts now
         if (cue.Vmx == true)
         {
             // VMX: libVLC gives sound, clock, pause, jumps and the end; the picture comes from libvmx at the play position
@@ -270,7 +281,7 @@ internal sealed class Deck : IDisposable
         {
             if (_evTime < 0) return;
             long now = _posClock.ElapsedMilliseconds;
-            if (Mode == DeckMode.Playing) _evTime += Math.Min(1500, now - _evAt);
+            if (Mode == DeckMode.Playing) _evTime += Math.Min(RunOnLimit, now - _evAt);
             _evAt = now;
         }
     }
@@ -310,6 +321,9 @@ internal sealed class Deck : IDisposable
         if (_vmx != null && Mode == DeckMode.Preroll) TryVmxPreroll();
     }
 
+    // how far the clock runs on without a libVLC time event; still pictures get none (own clock), so no limit for them
+    private long RunOnLimit => StillMs >= 0 ? long.MaxValue / 4 : 1500;
+
     public static readonly bool TraceTime = Environment.GetEnvironmentVariable("CUEPLAYER_TEST_TIMEEV") == "1";
 
     private void ResetPosition() { lock (_posSync) { _evTime = -1; _lastPos = 0; } }
@@ -326,14 +340,18 @@ internal sealed class Deck : IDisposable
                 // runs on from the last event; the limit only catches a real stall. It was 400 ms: libVLC sometimes skips one of its
                 // ~250 ms events (MOV from the NAS: 1652 -> 2151 ms), the clock then stood still for 100 ms and jumped - the FFmpeg sound
                 // followed every jump (resync ±60-90 ms, 2-3 per second = chirping and dropouts, Peter 2026-11-26)
-                if (Mode == DeckMode.Playing) p += Math.Min(1500, _posClock.ElapsedMilliseconds - _evAt);
+                if (Mode == DeckMode.Playing) p += Math.Min(RunOnLimit, _posClock.ElapsedMilliseconds - _evAt);
                 if (p < _lastPos && _lastPos - p < 400) p = _lastPos;   // never step back by a small amount
                 _lastPos = p;
                 return p;
             }
         }
     }
-    public long LengthMs => Math.Max(0, Mp.Length);
+    /// <summary>Still picture: its display time in ms (0 = until the operator goes on); -1 = not a still. Updated live by the engine.</summary>
+    public volatile int StillMs = -1;
+
+    /// <summary>Length of the cue; a still picture counts as long as its display time (infinite = 0: no end, no countdown).</summary>
+    public long LengthMs => StillMs >= 0 ? StillMs : Math.Max(0, Mp.Length);
 
     // ================= output side =================
 

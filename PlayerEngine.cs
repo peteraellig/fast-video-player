@@ -63,7 +63,7 @@ internal sealed class PlayerEngine : IDisposable
     /// Plays a file with a video track on the small check player until its first picture (up to 4 s). No picture = the format is not
     /// supported by libVLC (e.g. VMX1 from vMix): returns the reason, else null. One check at a time.
     /// </summary>
-    public async Task<string?> CheckDecodableAsync(string path)
+    public async Task<string?> CheckDecodableAsync(string path, string? thumbName = null)
     {
         await _checkLock.WaitAsync();
         try
@@ -76,6 +76,13 @@ internal sealed class PlayerEngine : IDisposable
             {
                 _checker.Load(_vlc, new Cue { Path = path, Name = Path.GetFileName(path), HasVideo = true }, CheckFormat, preroll: true);
                 bool ok = await Task.WhenAny(got.Task, Task.Delay(4000)) == got.Task;
+                // the first picture (160x90, letterboxed like on air) is also the thumbnail of the cue list
+                if (ok && thumbName != null)
+                {
+                    var buf = Marshal.AllocHGlobal(Thumbs.Width * Thumbs.Height * 2);
+                    try { if (_checker.CopyFirstPicture(buf, Thumbs.Width * Thumbs.Height * 2)) Thumbs.SaveUyvy(buf, thumbName); }
+                    finally { Marshal.FreeHGlobal(buf); }
+                }
                 return ok ? null : (_lastDecodeError ?? "no picture could be decoded");
             }
             finally
@@ -389,6 +396,9 @@ internal sealed class PlayerEngine : IDisposable
         // the audio choice can change while a cue plays: follow it on the decks that are heard
         if (!black) SyncAudio(a);
         if (inc != null) SyncAudio(inc);
+        // still pictures: the display time can change while the picture is on air
+        foreach (var d in _decks)
+            if (d.StillMs >= 0 && FindCue(d.CueId) is { } sc) d.StillMs = Still.Normalize(sc.StillSeconds) * 1000;
         // a cue that has a video track libVLC cannot decode (e.g. VMX1 from vMix) never delivers a picture: after 2 s it goes on air
         // with a black picture and its sound instead of waiting forever
         if (inc != null && !inc.HasPicture && !inc.AudioOnly && inc.Mode == DeckMode.Playing && Environment.TickCount64 - inc.LoadedAt > 2000)
@@ -402,6 +412,8 @@ internal sealed class PlayerEngine : IDisposable
         if (inc != null || a.Mode != DeckMode.Playing) return;
         var cue = FindCue(a.CueId);
         if (cue == null) return;
+        // a still picture never ends by itself (libVLC shows it endlessly): its time is up = the end of the cue (all end actions)
+        if (a.StillMs > 0 && a.SmoothTimeMs >= a.StillMs) { OnEnd(a, a.Serial); return; }
         var o = Other(a);
         var (target, fade, loop) = Follow(cue);
         bool oLoading = o.Mode is DeckMode.Preroll or DeckMode.Prerolled;

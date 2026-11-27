@@ -37,6 +37,82 @@ internal static class EndAction
     public static string Normalize(string? a) => All.Contains(a) ? a! : Hold;
 }
 
+/// <summary>
+/// Still pictures (Peter 2026-11-27). libVLC shows them as a video (":image-duration=-1" = endless, its clock runs); the engine ends
+/// them after the chosen time itself, so a change of the time applies also while the picture is on air.
+/// </summary>
+internal static class Still
+{
+    // TIFF: libVLC cannot decode it, but Prepared reads it with Windows' own decoder and hands libVLC a BMP
+    public static readonly string[] Extensions = [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"];
+    public const int DefaultSeconds = 10, MaxSeconds = 30;
+    public static bool Is(string? path) => path != null && Extensions.Contains(System.IO.Path.GetExtension(path).ToLowerInvariant());
+    public static int Normalize(int s) => Math.Clamp(s, 0, MaxSeconds);   // 0 = infinite
+
+    private static readonly string CacheDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fastvideoplayer_stills");
+
+    /// <summary>
+    /// The picture at exactly the output size: scaled to fit, black bars, turned upright by its EXIF orientation; written once as BMP
+    /// into a cache (key = file, its time and size, output size) and played by libVLC instead of the original. libVLC's picture decoders
+    /// deliver RGB, and its canvas/croppadd filters only work on YUV - they were dropped silently and a 4:3 picture came out stretched
+    /// to 16:9. Null = could not be read (libVLC then plays the original).
+    /// </summary>
+    public static string? Prepared(string path, int outW, int outH)
+    {
+        try
+        {
+            var fi = new FileInfo(path);
+            string key = $"{path}|{fi.LastWriteTimeUtc.Ticks}|{fi.Length}|{outW}x{outH}";
+            string hash = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(key)))[..16];
+            Directory.CreateDirectory(CacheDir);
+            string file = System.IO.Path.Combine(CacheDir, $"{hash}_{outW}x{outH}.bmp");
+            if (File.Exists(file)) return file;
+
+            using var src = System.Drawing.Image.FromFile(path);
+            // EXIF orientation (photos from phones/cameras are often stored sideways)
+            const int OrientationTag = 0x0112;
+            if (src.PropertyIdList.Contains(OrientationTag))
+            {
+                var flip = BitConverter.ToUInt16(src.GetPropertyItem(OrientationTag)!.Value!, 0) switch
+                {
+                    2 => System.Drawing.RotateFlipType.RotateNoneFlipX, 3 => System.Drawing.RotateFlipType.Rotate180FlipNone,
+                    4 => System.Drawing.RotateFlipType.Rotate180FlipX, 5 => System.Drawing.RotateFlipType.Rotate90FlipX,
+                    6 => System.Drawing.RotateFlipType.Rotate90FlipNone, 7 => System.Drawing.RotateFlipType.Rotate270FlipX,
+                    8 => System.Drawing.RotateFlipType.Rotate270FlipNone, _ => System.Drawing.RotateFlipType.RotateNoneFlipNone,
+                };
+                src.RotateFlip(flip);
+            }
+            double scale = Math.Min(outW / (double)src.Width, outH / (double)src.Height);
+            int w = (int)Math.Round(src.Width * scale), h = (int)Math.Round(src.Height * scale);
+            using var dst = new System.Drawing.Bitmap(outW, outH, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            using (var g = System.Drawing.Graphics.FromImage(dst))
+            {
+                g.Clear(System.Drawing.Color.Black);
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.DrawImage(src, (outW - w) / 2, (outH - h) / 2, w, h);   // transparent parts end up on black
+            }
+            string tmp = file + ".tmp";
+            dst.Save(tmp, System.Drawing.Imaging.ImageFormat.Bmp);
+            File.Move(tmp, file, true);
+            return file;
+        }
+        catch (Exception e) { Log.Write($"still {path}: {e.Message}"); return null; }
+    }
+
+    /// <summary>Removes prepared pictures older than two days (called at start).</summary>
+    public static void CleanCache()
+    {
+        try
+        {
+            if (!Directory.Exists(CacheDir)) return;
+            foreach (var f in Directory.GetFiles(CacheDir))
+                if (File.GetLastAccessTimeUtc(f) < DateTime.UtcNow.AddDays(-2)) File.Delete(f);
+        }
+        catch { }
+    }
+}
+
 internal sealed class Cue
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
@@ -47,6 +123,12 @@ internal sealed class Cue
 
     /// <summary>File not found when the playlist was opened (shown in the list).</summary>
     public bool Missing { get; set; }
+
+    /// <summary>Still picture: shown for this many seconds, then the end action (0 = until the operator goes on). Peter: 1-30 s or infinite.</summary>
+    public int StillSeconds { get; set; } = Still.DefaultSeconds;
+
+    /// <summary>The file is a still picture (by its extension). Sent to the page, so the row shows the time instead of the audio choice.</summary>
+    public bool IsStill => Still.Is(Path);
 
     /// <summary>Audio choice: "12", "34", "56", "78", "1", "2", "all", "t1".."t8" (track of a multi-track file) or "mute".</summary>
     public string Audio { get; set; } = AudioChoice.Default;
@@ -62,6 +144,9 @@ internal sealed class Cue
 
     /// <summary>The test decode has been done for this file.</summary>
     public bool DecodeChecked { get; set; }
+
+    /// <summary>File name of the cue's thumbnail in <see cref="Thumbs.Folder"/> (null = none yet / audio only).</summary>
+    public string? Thumb { get; set; }
 
     /// <summary>The picture is VMX (vMix recordings, fourcc VMX1): decoded by libvmx instead of libVLC (null = not checked yet).</summary>
     public bool? Vmx { get; set; }
@@ -198,6 +283,7 @@ internal static class Playlist
         public List<int>? AudioTracks { get; set; }
         public bool? HasVideo { get; set; }
         public bool? AudioRates48 { get; set; }
+        public int StillSeconds { get; set; } = Still.DefaultSeconds;
     }
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
@@ -220,6 +306,7 @@ internal static class Playlist
                 AudioTracks = c.AudioTracks,
                 HasVideo = c.HasVideo,
                 AudioRates48 = c.AudioRates48,
+                StillSeconds = c.StillSeconds,
             }).ToList(),
         };
         var tmp = file + ".tmp";
@@ -254,6 +341,7 @@ internal static class Playlist
                 AudioTracks = e.AudioTracks,
                 HasVideo = e.HasVideo,
                 AudioRates48 = e.AudioRates48,
+                StillSeconds = Still.Normalize(e.StillSeconds),
             };
             cue.Audio = AudioChoice.Normalize(e.Audio, cue);
             cues.Add(cue);

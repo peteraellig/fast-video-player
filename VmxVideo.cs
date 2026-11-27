@@ -35,6 +35,45 @@ internal sealed unsafe class VmxVideo : IDisposable
         finally { if (fmt != null) ffmpeg.avformat_close_input(&fmt); }
     }
 
+    /// <summary>Thumbnail of a VMX file: its first picture decoded by libvmx, scaled to the thumbnail size.</summary>
+    public static bool Thumb(string path, string name)
+    {
+        _ = FfmpegAudio.Status;
+        AVFormatContext* fmt = null;
+        AVPacket* pkt = null;
+        IntPtr vmx = IntPtr.Zero, buf = IntPtr.Zero;
+        try
+        {
+            if (ffmpeg.avformat_open_input(&fmt, path, null, null) < 0) return false;
+            ffmpeg.avformat_find_stream_info(fmt, null);
+            int vs = -1;
+            for (int i = 0; i < fmt->nb_streams; i++)
+                if (vs < 0 && fmt->streams[i]->codecpar->codec_type == AVMediaType.AVMEDIA_TYPE_VIDEO) vs = i; else fmt->streams[i]->discard = AVDiscard.AVDISCARD_ALL;
+            if (vs < 0) return false;
+            int w = fmt->streams[vs]->codecpar->width, h = fmt->streams[vs]->codecpar->height;
+            vmx = VmxNative.VMX_Create(new VmxNative.VmxSize { Width = w, Height = h }, VmxNative.ProfileDefault, VmxNative.ColorSpaceBt709);
+            if (vmx == IntPtr.Zero) return false;
+            buf = Marshal.AllocHGlobal(w * h * 2);
+            pkt = ffmpeg.av_packet_alloc();
+            while (ffmpeg.av_read_frame(fmt, pkt) >= 0)
+            {
+                if (pkt->stream_index != vs) { ffmpeg.av_packet_unref(pkt); continue; }
+                bool ok = VmxNative.VMX_LoadFrom(vmx, pkt->data, pkt->size) == 0 && VmxNative.VMX_DecodeUYVY(vmx, (byte*)buf, w * 2) == 0;
+                ffmpeg.av_packet_unref(pkt);
+                return ok && Thumbs.SaveUyvyScaled(buf, w, h, name);
+            }
+            return false;
+        }
+        catch { return false; }
+        finally
+        {
+            if (pkt != null) ffmpeg.av_packet_free(&pkt);
+            if (vmx != IntPtr.Zero) VmxNative.VMX_Destroy(vmx);
+            if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+            if (fmt != null) ffmpeg.avformat_close_input(&fmt);
+        }
+    }
+
     private readonly string _path;
     private readonly OutputFormat _out;
     private readonly int _bytes;
