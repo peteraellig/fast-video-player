@@ -285,7 +285,6 @@ internal sealed class PlayerEngine : IDisposable
             if (!black && inc == null && a.Mode == DeckMode.Ended && _selectedId == id) StopToCue(id, "hold released");
         });
     }
-    public void ApplySettings() => _commands.Add(() => { StopNow(); RebuildOutputs(); });
 
     /// <summary>Opens the listening device from the settings (or closes it); the outputs keep running.</summary>
     public void ApplyMonitor() => ApplyMonitorInBackground(force: true);
@@ -893,7 +892,7 @@ internal sealed class PlayerEngine : IDisposable
         }
         catch (Exception e)
         {
-            Log.Write($"{name} output failed, dropped until Apply: {e}");
+            Log.Write($"{name} output failed, dropped until restart: {e}");
             setStatus("failed: " + e.Message);
             return false;
         }

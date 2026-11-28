@@ -50,7 +50,7 @@ internal sealed class MainForm : Form
         _timer.Tick += (_, _) => PushState();
         Load += async (_, _) => { FitToScreen(); ProbeMissing(); _remote.Apply(_store.Read(s => s.Settings.Clone())); await InitWebAsync(); };
         FormClosed += (_, _) => _remote.Dispose();
-        // the HDMI output never goes onto the monitor with this window (looked up again on every Apply)
+        // the HDMI output never goes onto the monitor with this window (looked up when the outputs open at start)
         Move += (_, _) => _engine.ControlScreen = Screen.FromControl(this).DeviceName;
         FormClosing += OnClosing;
         _engine.PreviewReady += OnPreview;
@@ -98,7 +98,7 @@ internal sealed class MainForm : Form
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
-        if (IsPlaying() &&
+        if (!_restarting && IsPlaying() &&
             MessageBox.Show(this, "A cue is playing. Quit the player and stop the output?", AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
         {
             e.Cancel = true;
@@ -408,13 +408,42 @@ internal sealed class MainForm : Form
         bool restart = n.Format != old.Format || n.SourceName != old.SourceName || n.Ndi != old.Ndi || n.Omt != old.Omt || n.Sdi != old.Sdi || n.SdiPort != old.SdiPort || n.Hdmi != old.Hdmi || n.HdmiScreen != old.HdmiScreen;
         if (restart)
         {
-            if (IsPlaying() && MessageBox.Show(this, "Changing the output stops the cue that is playing. Continue?", AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            // Peter 2026-11-28: switching SDI/HDMI off while a clip played closed the player without a word (on another PC, no log).
+            // No live rebuild of the outputs any more: the player restarts and opens them fresh with the new settings.
+            var text = "The new output settings need a restart of the player."
+                + (IsPlaying() ? "\nThe cue that is playing stops." : "")
+                + "\n\nRestart now?\n(No = keep the old output settings)";
+            if (MessageBox.Show(this, text, AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
             {
                 _store.Change(s => { s.Settings = old; s.Settings.GainDb = n.GainDb; });
                 return;
             }
-            _engine.ApplySettings();
+            Restart();
         }
+    }
+
+    private bool _restarting;
+
+    /// <summary>Starts a new player that waits until this one has ended (one instance only), then closes this window.</summary>
+    private void Restart()
+    {
+        _store.Flush();
+        Log.Write("restart for new output settings");
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!, $"--after {Environment.ProcessId}")
+            {
+                UseShellExecute = false,
+                WorkingDirectory = AppContext.BaseDirectory,
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"restart failed: {ex.Message}");
+            MessageBox.Show(this, "The settings are saved, but the player could not restart itself. Please start it again.", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        _restarting = true;
+        Close();
     }
 
     private void AddWithDialog()

@@ -61,6 +61,14 @@ internal static class Program
             return args[0] == "--probe" ? Probe.Run(args) : TestPlay(args);
         }
 
+        // --after PID: restart after new output settings - wait until the old player has ended (also if it crashes while closing)
+        if (args.Length > 1 && args[0] == "--after" && int.TryParse(args[1], out var oldPid))
+        {
+            try { using var old = System.Diagnostics.Process.GetProcessById(oldPid); old.WaitForExit(20000); }
+            catch (ArgumentException) { }   // already gone
+            catch (InvalidOperationException) { }
+        }
+
         // only one CuePlayer per PC: two would fight over the NDI name (NDI refuses a second sender with the same name; seen 2026-11-25)
         using var single = new Mutex(true, @"Local\CuePlayer.SingleInstance", out bool first);
         if (!first)
