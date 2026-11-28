@@ -422,8 +422,13 @@ internal sealed class PlayerEngine : IDisposable
         EndAction.Fade => (Neighbour(cue.Id, +1), true, false),
         EndAction.Loop => (cue.Id, false, true),
         EndAction.LoopFade => (cue.Id, true, true),
+        // jump: the chosen cue; gone (removed) or none chosen = nothing follows (Hold). Jumping to itself is a loop.
+        EndAction.Jump or EndAction.JumpFade when JumpTarget(cue) is { } t => (t, cue.EndAction == EndAction.JumpFade, t == cue.Id),
         _ => (null, false, false),
     };
+
+    /// <summary>The jump target of a cue if it is still in the list, else null.</summary>
+    private string? JumpTarget(Cue cue) => cue.JumpTo is { } t && _store.Read(s => s.Cues.Any(c => c.Id == t)) ? t : null;
 
     /// <summary>
     /// Every 40 ms: near the end of the cue on air, preroll what follows it and start the fade in time; while stopped, keep the chosen
@@ -560,7 +565,7 @@ internal sealed class PlayerEngine : IDisposable
         var cue = FindCue(deck.CueId);
         var action = cue?.EndAction ?? EndAction.Stop;
         Log.Write($"end of {cue?.Name} on {deck.Name} -> {action} (length {deck.LengthMs}, last estimate {deck.SmoothTimeMs})");
-        if (action is EndAction.Next or EndAction.Fade or EndAction.Loop or EndAction.LoopFade)
+        if (action is EndAction.Next or EndAction.Fade or EndAction.Loop or EndAction.LoopFade or EndAction.Jump or EndAction.JumpFade)
         {
             if (inc != null) { deck.Stop(keepPicture: true); return; }   // fade already running: hold the last picture under it
             var (target, fade, loop) = Follow(cue!);

@@ -274,6 +274,7 @@ internal sealed class RemoteHttp : IDisposable
         "GET|POST /api/cue/{n}/play            play this cue now (cut)",
         "GET|POST /api/cue/{n}/select          make this cue NEXT (stopped: its first picture goes on air)",
         "GET|POST /api/cue/{n}/endaction/{a}   a = hold, black, next, fade, loop, loopfade",
+        "GET|POST /api/cue/{n}/endaction/jump/{m}   at the end jump to cue m (jumpfade/{m}: with a fade)",
         "  (every /api/cue/{n}/... also as /api/cue/id/{id}/...)",
     ];
 
@@ -293,7 +294,7 @@ internal sealed class RemoteHttp : IDisposable
             case "cues" when seg.Count == 1:
             {
                 var cues = Cues();
-                return Ok(new { count = cues.Count, cues = cues.Select((c, i) => CueInfo(c, i)) });
+                return Ok(new { count = cues.Count, cues = cues.Select((c, i) => CueInfo(c, i, cues)) });
             }
             case "go" when seg.Count == 1: _engine.Go(); return Done("go", remote);
             case "stop" when seg.Count == 1: _engine.Stop(); return Done("stop", remote);
@@ -341,16 +342,24 @@ internal sealed class RemoteHttp : IDisposable
         string label = $"cue {at + 1} '{cue.Name}'";
         switch (verb)
         {
-            case "" when seg.Count == i: return Ok(CueInfo(cue, at));
+            case "" when seg.Count == i: return Ok(CueInfo(cue, at, cues));
             case "play" when seg.Count == i + 1: _engine.Play(cue.Id); return Done($"play {label}", remote);
             case "select" when seg.Count == i + 1: _engine.Select(cue.Id); return Done($"select {label}", remote);
+            case "endaction" when seg.Count == i + 3 && seg[i + 1].ToLowerInvariant() is "jump" or "jumpfade":
+            {
+                // jump to cue m (its position now; stored by id, so later reordering keeps the target)
+                if (!int.TryParse(seg[i + 2], out var m) || m < 1 || m > cues.Count) return Bad($"jump target: a cue number 1-{cues.Count}");
+                string ja = seg[i + 1].ToLowerInvariant() == "jump" ? EndAction.Jump : EndAction.JumpFade, target = cues[m - 1].Id;
+                _store.Change(s => { var c = s.Cues.FirstOrDefault(c => c.Id == cue.Id); if (c != null) { c.EndAction = ja; c.JumpTo = target; s.Modified = true; } });
+                return Done($"endaction {ja} -> cue {m} {label}", remote);
+            }
             case "endaction" when seg.Count == i + 2:
                 string? a = seg[i + 1].ToLowerInvariant() switch
                 {
                     "hold" => EndAction.Hold, "black" or "stop" => EndAction.Stop, "next" or "cut" => EndAction.Next,
                     "fade" => EndAction.Fade, "loop" => EndAction.Loop, "loopfade" => EndAction.LoopFade, _ => null,
                 };
-                if (a == null) return Bad("end action: hold, black, next, fade, loop or loopfade");
+                if (a == null) return Bad("end action: hold, black, next, fade, loop, loopfade, or jump/{m} / jumpfade/{m}");
                 _store.Change(s => { var c = s.Cues.FirstOrDefault(c => c.Id == cue.Id); if (c != null) { c.EndAction = a; s.Modified = true; } });
                 return Done($"endaction {a} {label}", remote);
         }
@@ -371,13 +380,15 @@ internal sealed class RemoteHttp : IDisposable
         return (200, Json(new { ok = true, command = what }));
     }
 
-    private static object CueInfo(Cue c, int index) => new
+    private static object CueInfo(Cue c, int index, List<Cue> all) => new
     {
         number = index + 1,
         id = c.Id,
         name = c.Name,
         durationMs = c.DurationMs,
         endAction = c.EndAction,
+        // jump / jumpfade: number of the target cue (null = no target, or it was removed: the cue then holds)
+        jumpTo = EndAction.IsJump(c.EndAction) && all.FindIndex(x => x.Id == c.JumpTo) is >= 0 and var j ? j + 1 : (int?)null,
         isStill = c.IsStill,
         missing = c.Missing,
         unsupported = c.Unsupported != null,
@@ -394,7 +405,7 @@ internal sealed class RemoteHttp : IDisposable
         object? Info(string? id)
         {
             int i = id == null ? -1 : cues.FindIndex(c => c.Id == id);
-            return i < 0 ? null : CueInfo(cues[i], i);
+            return i < 0 ? null : CueInfo(cues[i], i, cues);
         }
         object? onAir = null;
         int cur = p.CurrentId == null ? -1 : cues.FindIndex(c => c.Id == p.CurrentId);
@@ -402,7 +413,8 @@ internal sealed class RemoteHttp : IDisposable
         {
             var c = cues[cur];
             long? remaining = p.LengthMs > 0 ? Math.Max(0, p.LengthMs - p.PositionMs) : null;
-            bool loops = c.EndAction is EndAction.Loop or EndAction.LoopFade || (c.IsStill && c.StillSeconds == 0);
+            bool loops = c.EndAction is EndAction.Loop or EndAction.LoopFade || (c.IsStill && c.StillSeconds == 0)
+                         || (EndAction.IsJump(c.EndAction) && c.JumpTo == c.Id);   // a jump to itself is a loop
             int? countdown = !loops && remaining is > 0 and <= 10_000 && p.State is "playing" or "paused" ? (int)Math.Ceiling(remaining.Value / 1000.0) : null;
             onAir = new
             {

@@ -205,7 +205,21 @@ internal sealed class MainForm : Form
                     break;
                 case "remove": ChangeCues(s => s.Cues.RemoveAll(c => c.Id == Str("id"))); break;
                 case "endAction":
-                    ChangeCues(s => { var c = s.Cues.FirstOrDefault(c => c.Id == Str("id")); if (c != null) c.EndAction = EndAction.Normalize(Str("action")); });
+                    ChangeCues(s =>
+                    {
+                        var c = s.Cues.FirstOrDefault(c => c.Id == Str("id"));
+                        if (c == null) return;
+                        c.EndAction = EndAction.Normalize(Str("action"));
+                        // jump chosen without a (still existing) target: the first cue - the usual case, the playlist repeats
+                        if (EndAction.IsJump(c.EndAction) && !s.Cues.Any(x => x.Id == c.JumpTo)) c.JumpTo = s.Cues[0].Id;
+                    });
+                    break;
+                case "jumpTo":
+                    ChangeCues(s =>
+                    {
+                        var c = s.Cues.FirstOrDefault(c => c.Id == Str("id"));
+                        if (c != null && s.Cues.Any(x => x.Id == Str("target"))) c.JumpTo = Str("target");
+                    });
                     break;
                 case "still":
                     // display time of a still picture, applies at once (also while it is on air)

@@ -33,8 +33,13 @@ internal static class EndAction
     public const string Fade = "fade";   // next cue fades in over the fade time (prerolled)
     public const string Loop = "loop";   // cue repeats (cut back to its start, prerolled: gapless)
     public const string LoopFade = "loopfade";   // cue repeats with a fade into its own start (for clips without a clean end)
-    public static readonly string[] All = [Stop, Hold, Next, Fade, Loop, LoopFade];
+    // Peter 2026-11-28 (Mitti: "Goto after End"): another cue follows, chosen per cue (Cue.JumpTo) - e.g. the last cue jumps to the first
+    // and the whole playlist repeats. A target that is gone = Hold.
+    public const string Jump = "jump";           // cut to the target cue (prerolled: gapless)
+    public const string JumpFade = "jumpfade";   // fade into the target cue
+    public static readonly string[] All = [Stop, Hold, Next, Fade, Loop, LoopFade, Jump, JumpFade];
     public static string Normalize(string? a) => All.Contains(a) ? a! : Hold;
+    public static bool IsJump(string? a) => a is Jump or JumpFade;
 }
 
 /// <summary>
@@ -120,6 +125,9 @@ internal sealed class Cue
     public string Name { get; set; } = "";
     public long DurationMs { get; set; }
     public string EndAction { get; set; } = CuePlayer.EndAction.Hold;
+
+    /// <summary>End action Jump / Jump (fade): the Id of the cue that follows (an Id, so reordering keeps it right; null = none chosen).</summary>
+    public string? JumpTo { get; set; }
 
     /// <summary>File not found when the playlist was opened (shown in the list).</summary>
     public bool Missing { get; set; }
@@ -272,6 +280,8 @@ internal static class Playlist
 
     private sealed class Entry
     {
+        public string? Id { get; set; }          // since 0.1.0.44 (jump targets refer to it); older playlists: new ids at load
+        public string? JumpTo { get; set; }
         public string Name { get; set; } = "";
         public string Path { get; set; } = "";
         public string? RelativePath { get; set; }
@@ -294,6 +304,8 @@ internal static class Playlist
             FadeMs = CuePlayer.Fade.Normalize(fadeMs),
             Cues = cues.Select(c => new Entry
             {
+                Id = c.Id,
+                JumpTo = c.JumpTo,
                 Name = c.Name,
                 Path = c.Path,
                 RelativePath = System.IO.Path.GetPathRoot(c.Path)?.Equals(System.IO.Path.GetPathRoot(dir), StringComparison.OrdinalIgnoreCase) == true
@@ -318,6 +330,7 @@ internal static class Playlist
         var model = JsonSerializer.Deserialize<FileModel>(File.ReadAllText(file)) ?? throw new InvalidDataException("Not a CuePlayer playlist");
         var dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(file))!;
         var cues = new List<Cue>();
+        var ids = new HashSet<string>();
         int missing = 0;
         foreach (var e in model.Cues)
         {
@@ -340,7 +353,10 @@ internal static class Playlist
                 HasVideo = e.HasVideo,
                 AudioRates48 = e.AudioRates48,
                 StillSeconds = Still.Normalize(e.StillSeconds),
+                JumpTo = e.JumpTo,
             };
+            // the saved id (jump targets point at it), unless missing or used twice - then the new one from the constructor
+            if (!string.IsNullOrWhiteSpace(e.Id) && ids.Add(e.Id)) cue.Id = e.Id; else ids.Add(cue.Id);
             cue.Audio = AudioChoice.Normalize(e.Audio, cue);
             cues.Add(cue);
         }

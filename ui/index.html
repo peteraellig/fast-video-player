@@ -76,6 +76,9 @@
   .cue .del { background: none; border: none; color: var(--dim); padding: 2px 6px; font-size: 16px; }
   .cue .del:hover { color: var(--text); }
   .cue .mv { display: flex; gap: 4px; }
+  /* end action Jump: the action and its target stacked in the same column, compact, so the row keeps its height */
+  .cue .endcell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .cue .endcell select { padding: 1px 4px; font-size: 12px; width: 100%; min-width: 0; }
   .cue .mv button { padding: 2px 0; width: 28px; font-size: 12px; line-height: 1.4; }
   .cue .mv button:disabled { opacity: .3; cursor: default; }
   .cue .prog { position: absolute; left: 0; bottom: 0; height: 4px; background: var(--accent); width: 0; }
@@ -303,6 +306,7 @@
       <tr><td><b>Cut next</b></td><td>the next cue follows without a gap</td></tr>
       <tr><td><b>Fade next</b></td><td>the next cue fades in over the fade time (100-1000 ms, saved with the playlist)</td></tr>
       <tr><td><b>Loop / Loop fade</b></td><td>the cue repeats, with a cut or a fade into its own start</td></tr>
+      <tr><td><b>Jump (cut / fade)</b></td><td>another cue follows, chosen in the second dropdown (e.g. the last cue jumps to the first: the whole playlist repeats)</td></tr>
     </table>
     <h4>Outputs</h4>
     <ul>
@@ -327,6 +331,7 @@
       <tr><td><code>/api/cue/{n}/play</code></td><td>play cue n now (n = position in the list, 1 = first)</td></tr>
       <tr><td><code>/api/cue/{n}/select</code></td><td>make cue n NEXT (while stopped: its first picture goes on air)</td></tr>
       <tr><td><code>/api/cue/{n}/endaction/{a}</code></td><td>a = hold, black, next, fade, loop, loopfade</td></tr>
+      <tr><td><code>/api/cue/{n}/endaction/jump/{m}</code></td><td>at the end jump to cue m (<code>jumpfade</code> instead of <code>jump</code>: with a fade)</td></tr>
       <tr><td><code>/api/cue/id/{id}/…</code></td><td>the same by the cue's fixed id (stays right when the list is reordered)</td></tr>
     </table>
     <p>Every command works with GET (a plain link) or POST. The answer is JSON: <code>{"ok": true, "command": "go"}</code>, errors with <code>"ok": false</code> and the reason.
@@ -367,7 +372,10 @@ let listKey = '';             // to rebuild the list only when it changed
 let settingsDirty = false;
 let dragId = null;
 
-const END_LABELS = { hold: 'Hold last', stop: 'Black', next: 'Cut next', fade: 'Fade next', loop: 'Loop', loopfade: 'Loop fade' };
+const END_LABELS = { hold: 'Hold last', stop: 'Black', next: 'Cut next', fade: 'Fade next', loop: 'Loop', loopfade: 'Loop fade', jump: 'Jump (cut)', jumpfade: 'Jump (fade)' };
+const isJump = a => a === 'jump' || a === 'jumpfade';
+// the cue ends in a loop (no countdown): Loop / Loop fade, or a jump to itself
+const loops = c => c && (c.endAction === 'loop' || c.endAction === 'loopfade' || (isJump(c.endAction) && c.jumpTo === c.id));
 
 function fmt(ms, tenths) {
   if (!(ms >= 0)) return tenths ? '--:--.-' : '--:--';
@@ -621,7 +629,7 @@ function renderClock(s) {
     $('seekFill').style.width = s.state === 'ended' ? '100%' : '0';
   }
   // countdown 10 ... 1 in the last 10 s (not for Loop cues, they do not end); the remaining time turns yellow and bold as well
-  const counting = playing && s.lengthMs > 0 && remainMs <= 10000 && !(cur && (cur.endAction === 'loop' || cur.endAction === 'loopfade'));
+  const counting = playing && s.lengthMs > 0 && remainMs <= 10000 && !loops(cur);
   $('countdown').classList.toggle('on', counting);
   if (counting) $('countdown').textContent = Math.max(1, Math.ceil(remainMs / 1000));
   $('remain').classList.toggle('final', counting);
@@ -668,7 +676,8 @@ function renderList(s) {
                  (c.id === s.cuedId ? '<div class="tag play">■ CUED</div>' : c.id === s.prerolledId ? '<div class="tag ready">◆ READY</div>' : '') +
                  (c.id === sel ? '<div class="tag next">● NEXT</div>' : '') +
                  (c.missing ? '<div class="tag miss">⚠ MISSING</div>' : '') +
-                 (c.unsupported ? `<div class="tag miss" title="${esc(c.unsupported)}">⚠ NO PICTURE</div>` : '');
+                 (c.unsupported ? `<div class="tag miss" title="${esc(c.unsupported)}">⚠ NO PICTURE</div>` : '') +
+                 (isJump(c.endAction) && !s.cues.some(t => t.id === c.jumpTo) ? '<div class="tag miss" title="The jump target was removed: the cue holds its last picture">⚠ NO TARGET</div>' : '');
     const aopts = (s.audioOptions[c.id] || []).map(o => `<option value="${o.value}" ${c.audio === o.value ? 'selected' : ''}>${o.label}</option>`).join('');
     const opts = Object.entries(END_LABELS).map(([v, l]) => `<option value="${v}" ${c.endAction === v ? 'selected' : ''}>${l}</option>`).join('');
     return `<div class="cue ${c.id === sel ? 'selected' : ''} ${playing ? 'playing' : ''} ${c.missing ? 'missing' : ''}" data-id="${c.id}" draggable="true">
@@ -680,7 +689,11 @@ function renderList(s) {
       ${c.isStill
         ? `<select data-act="still" title="Still picture: how long it is shown, then the end action (applies at once)">${STILL_OPTS.map(([v, l]) => `<option value="${v}" ${c.stillSeconds === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`
         : `<select data-act="audio" title="Audio: channels or track of the file (applies at once)">${aopts}</select>`}
-      <select data-act="end" title="At the end">${opts}</select>
+      ${isJump(c.endAction)
+        ? `<span class="endcell"><select data-act="end" title="At the end">${opts}</select><select data-act="jump" title="Jump to this cue at the end (the last cue jumping to the first repeats the playlist)">${
+            (s.cues.some(t => t.id === c.jumpTo) ? '' : '<option value="" selected>→ choose…</option>') +
+            s.cues.map((t, j) => `<option value="${t.id}" ${c.jumpTo === t.id ? 'selected' : ''}>→ ${j + 1} ${esc(t.name)}</option>`).join('')}</select></span>`
+        : `<select data-act="end" title="At the end">${opts}</select>`}
       <span class="mv"><button data-act="up" title="Move up (Alt+↑)" ${i === 0 ? 'disabled' : ''}>▲</button><button data-act="down" title="Move down (Alt+↓)" ${i === s.cues.length - 1 ? 'disabled' : ''}>▼</button></span>
       <button class="del" data-act="del" title="Remove from list">×</button>
       <div class="prog"></div>
@@ -704,6 +717,7 @@ cuesBox.addEventListener('dblclick', e => {
 cuesBox.addEventListener('change', e => {
   const row = e.target.closest('.cue');
   if (row && e.target.dataset.act === 'end') send('endAction', { id: row.dataset.id, action: e.target.value });
+  if (row && e.target.dataset.act === 'jump' && e.target.value) send('jumpTo', { id: row.dataset.id, target: e.target.value });
   if (row && e.target.dataset.act === 'audio') send('audio', { id: row.dataset.id, value: e.target.value });
   if (row && e.target.dataset.act === 'still') send('still', { id: row.dataset.id, seconds: +e.target.value });
   if (e.target.tagName === 'SELECT') e.target.blur();   // chosen: the list may rebuild again (and Space is GO again)
