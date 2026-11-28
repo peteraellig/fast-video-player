@@ -10,7 +10,7 @@ A Windows playout tool for single clips or a cue list. It sends video and audio 
 
 - **Cue list.** Save playlists as `.cuelist` files. Reorder clips by dragging them, using the ▲ and ▼ buttons, or pressing Alt + arrow keys.
 - **First frame ready.** When playback is stopped, the selected clip's first frame appears on all outputs.
-- **End actions per clip.** Choose Hold last, Black, Cut next, Fade next, Loop or Loop fade, jump or jump fade. The playlist stores the fade time (100–1000 ms).
+- **End actions per clip.** Choose Hold last, Black, Cut next, Fade next, Loop or Loop fade, jump or jump fade. The playlist stores the fade time (100–1000 ms). With Jump, you can loop parts of or the entire playlist indefinitely.
 - **Seamless transitions.** Two playback decks let the next clip preroll while the current clip plays.
 - **Countdown.** Use the **Last 10 s** button to jump to the final 10 seconds. An on-screen countdown shows the time remaining.
 - **Audio choice per clip.** Select a stereo pair (1+2, 3+4, 5+6 or 7+8), play any single channel from 1–8 in mono on both output channels, or mute the clip. Single-channel selection is useful for files with one language per track.
